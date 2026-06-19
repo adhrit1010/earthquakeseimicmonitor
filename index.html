@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TriAxis Dynamic Station</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>TriAxis Dynamic Seismic Station</h1>
+      <p id="status">Starting backend connection...</p>
+    </div>
+    <div class="cloud-pill"><span id="cloudDot"></span><span id="cloudText">Checking</span></div>
+  </header>
+
+  <section class="toolbar">
+    <input id="dateFrom" type="date" />
+    <input id="dateTo" type="date" />
+    <select id="classification">
+      <option value="">All classifications</option>
+      <option>Normal</option>
+      <option>Local Vibration</option>
+      <option>Weak Event</option>
+      <option>Strong Local Event</option>
+      <option>Distant Seismic Event</option>
+      <option>S-Wave Only Event</option>
+      <option>Confirmed Seismic Event</option>
+    </select>
+    <button id="loadBtn">Refresh</button>
+    <label><input id="autoRefresh" type="checkbox" checked /> Auto refresh</label>
+  </section>
+
+  <section class="grid">
+    <article class="card span3"><h2>Events</h2><div class="metric" id="count">--</div><p>Total loaded</p></article>
+    <article class="card span3"><h2>Peak PGA</h2><div class="metric" id="peakPga">--</div><p>cm/s2</p></article>
+    <article class="card span3"><h2>Max Magnitude</h2><div class="metric" id="maxMag">--</div><p>estimated</p></article>
+    <article class="card span3"><h2>Quality</h2><div class="metric" id="quality">--</div><p id="action">--</p></article>
+
+    <article class="card span6"><h2>PGA vs Time</h2><canvas id="pgaChart"></canvas></article>
+    <article class="card span6"><h2>Magnitude vs Time</h2><canvas id="magChart"></canvas></article>
+    <article class="card span6"><h2>Distance vs Time</h2><canvas id="distChart"></canvas></article>
+    <article class="card span6"><h2>Classification Frequency</h2><canvas id="classChart"></canvas></article>
+    <article class="card span12"><h2>STA/LTA Trends</h2><canvas id="staltaChart"></canvas></article>
+
+    <article class="card span5">
+      <h2>AI Station Agent</h2>
+      <div class="quick">
+        <button data-question="Summarize the current station data">Summarize</button>
+        <button data-question="What was the strongest event?">Strongest</button>
+        <button data-question="Is the validation error acceptable?">Validation</button>
+        <button data-question="Are the sensors agreeing?">Agreement</button>
+        <button data-question="How should I tune thresholds?">Tune</button>
+      </div>
+      <div id="chatLog" class="chat-log">
+        <p class="agent"><b>Agent:</b> Ask me about loaded events, strongest shaking, validation error, sensor agreement, or tuning.</p>
+      </div>
+      <div class="agent-row">
+        <input id="agentInput" placeholder="Ask the station agent..." />
+        <button id="askBtn">Ask</button>
+      </div>
+    </article>
+
+    <article class="card span7">
+      <h2>Event Table</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Time</th><th>Class</th><th>PGA</th><th>MMI</th><th>Distance</th><th>Mag</th><th>ADXL</th><th>LIS</th><th>MPU</th><th>Error</th></tr>
+          </thead>
+          <tbody id="rows"><tr><td colspan="10">No data loaded</td></tr></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
+
