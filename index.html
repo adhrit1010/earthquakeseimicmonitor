@@ -3,80 +3,210 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TriAxis Dynamic Station</title>
+  <title>TremorLab — Station TX-01</title>
+  <meta name="description" content="Live three-axis seismic monitoring station: ADXL345, LIS3DH, MPU6050." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-<main>
-  <header>
-    <div>
-      <h1>TriAxis Dynamic Seismic Station</h1>
-      <p id="status">Starting backend connection...</p>
-    </div>
-    <div class="cloud-pill"><span id="cloudDot"></span><span id="cloudText">Checking</span></div>
-  </header>
 
+<div class="grain"></div>
+
+<header class="masthead">
+  <div class="masthead-row">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.35"/>
+        <circle cx="20" cy="20" r="11" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.6"/>
+        <path d="M5 20 L14 20 L17 11 L21 29 L24 20 L35 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+      <div class="brand-text">
+        <h1>TremorLab</h1>
+        <p class="brand-sub">Station <span id="stationId">TX-01</span> &middot; Three-axis seismic array</p>
+      </div>
+    </div>
+    <div class="masthead-status">
+      <div class="status-chip" id="cloudChip">
+        <span class="status-dot" id="cloudDot"></span>
+        <span id="cloudText">Connecting&hellip;</span>
+      </div>
+      <p class="status-line" id="status">Establishing link to backend&hellip;</p>
+    </div>
+  </div>
+</header>
+
+<!-- HELICORDER: the signature element. A continuously scrolling seismic trace, drum-recorder style. -->
+<section class="helicorder" aria-label="Live helicorder trace">
+  <div class="helicorder-head">
+    <div class="helicorder-label">
+      <span class="eyebrow">Live trace</span>
+      <span class="helicorder-channels">ADXL345 &middot; LIS3DH &middot; MPU6050</span>
+    </div>
+    <div class="helicorder-readout">
+      <div class="readout-block">
+        <span class="readout-val" id="liveRatio">&minus;&minus;</span>
+        <span class="readout-key">STA/LTA</span>
+      </div>
+      <div class="readout-block">
+        <span class="readout-val" id="liveClass">IDLE</span>
+        <span class="readout-key">state</span>
+      </div>
+    </div>
+  </div>
+  <div class="helicorder-canvas-wrap">
+    <canvas id="helicorderChart" aria-hidden="true"></canvas>
+    <div class="helicorder-trigger-line" id="triggerLine"></div>
+  </div>
+  <div class="helicorder-foot">
+    <span>Sweeping right to left &middot; most recent sample at the trace head</span>
+  </div>
+</section>
+
+<main>
+
+  <!-- TOOLBAR -->
   <section class="toolbar">
-    <input id="dateFrom" type="date" />
-    <input id="dateTo" type="date" />
-    <select id="classification">
-      <option value="">All classifications</option>
-      <option>Normal</option>
-      <option>Local Vibration</option>
-      <option>Weak Event</option>
-      <option>Strong Local Event</option>
-      <option>Distant Seismic Event</option>
-      <option>S-Wave Only Event</option>
-      <option>Confirmed Seismic Event</option>
-    </select>
-    <button id="loadBtn">Refresh</button>
-    <label><input id="autoRefresh" type="checkbox" checked /> Auto refresh</label>
+    <div class="toolbar-group">
+      <label class="field">
+        <span>From</span>
+        <input id="dateFrom" type="date" />
+      </label>
+      <label class="field">
+        <span>To</span>
+        <input id="dateTo" type="date" />
+      </label>
+      <label class="field">
+        <span>Classification</span>
+        <select id="classification">
+          <option value="">All classifications</option>
+          <option>Normal</option>
+          <option>Local Vibration</option>
+          <option>Weak Event</option>
+          <option>Strong Local Event</option>
+          <option>Distant Seismic Event</option>
+          <option>S-Wave Only Event</option>
+          <option>Confirmed Seismic Event</option>
+        </select>
+      </label>
+    </div>
+    <div class="toolbar-group toolbar-actions">
+      <label class="toggle">
+        <input id="autoRefresh" type="checkbox" checked />
+        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        <span class="toggle-label">Auto refresh</span>
+      </label>
+      <button id="loadBtn" class="btn btn-primary">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M13.65 2.35a7 7 0 1 0 1.64 7.15.5.5 0 0 0-.95-.32 6 6 0 1 1-1.41-6.13l-1.6 1.6a.4.4 0 0 0 .28.68h3.27a.4.4 0 0 0 .4-.4V1.66a.4.4 0 0 0-.68-.28z"/></svg>
+        Refresh
+      </button>
+    </div>
   </section>
 
-  <section class="grid">
-    <article class="card span3"><h2>Events</h2><div class="metric" id="count">--</div><p>Total loaded</p></article>
-    <article class="card span3"><h2>Peak PGA</h2><div class="metric" id="peakPga">--</div><p>cm/s2</p></article>
-    <article class="card span3"><h2>Max Magnitude</h2><div class="metric" id="maxMag">--</div><p>estimated</p></article>
-    <article class="card span3"><h2>Quality</h2><div class="metric" id="quality">--</div><p id="action">--</p></article>
+  <!-- INSTRUMENT PANEL -->
+  <section class="panel-grid" aria-label="Station summary">
+    <article class="gauge-card">
+      <span class="eyebrow">Events loaded</span>
+      <div class="gauge-value" id="count">&mdash;</div>
+      <span class="gauge-unit">total in window</span>
+    </article>
+    <article class="gauge-card">
+      <span class="eyebrow">Peak PGA</span>
+      <div class="gauge-value" id="peakPga">&mdash;</div>
+      <span class="gauge-unit">cm/s&sup2;</span>
+    </article>
+    <article class="gauge-card">
+      <span class="eyebrow">Max magnitude</span>
+      <div class="gauge-value" id="maxMag">&mdash;</div>
+      <span class="gauge-unit">estimated</span>
+    </article>
+    <article class="gauge-card gauge-card--quality">
+      <span class="eyebrow">Data quality</span>
+      <div class="gauge-value" id="quality">&mdash;</div>
+      <div class="quality-bar"><div class="quality-bar-fill" id="qualityFill"></div></div>
+      <span class="gauge-unit" id="action">&mdash;</span>
+    </article>
+  </section>
 
-    <article class="card span6"><h2>PGA vs Time</h2><canvas id="pgaChart"></canvas></article>
-    <article class="card span6"><h2>Magnitude vs Time</h2><canvas id="magChart"></canvas></article>
-    <article class="card span6"><h2>Distance vs Time</h2><canvas id="distChart"></canvas></article>
-    <article class="card span6"><h2>Classification Frequency</h2><canvas id="classChart"></canvas></article>
-    <article class="card span12"><h2>STA/LTA Trends</h2><canvas id="staltaChart"></canvas></article>
+  <!-- CHARTS -->
+  <section class="chart-grid">
+    <article class="chart-card chart-card--wide">
+      <header><h2>STA/LTA trends</h2><p>All three sensors, merged trigger ratio over time</p></header>
+      <canvas id="staltaChart"></canvas>
+    </article>
+    <article class="chart-card">
+      <header><h2>PGA vs. time</h2><p>Peak ground acceleration</p></header>
+      <canvas id="pgaChart"></canvas>
+    </article>
+    <article class="chart-card">
+      <header><h2>Magnitude vs. time</h2><p>Estimated local magnitude</p></header>
+      <canvas id="magChart"></canvas>
+    </article>
+    <article class="chart-card">
+      <header><h2>Distance vs. time</h2><p>Estimated epicentral distance</p></header>
+      <canvas id="distChart"></canvas>
+    </article>
+    <article class="chart-card">
+      <header><h2>Classification frequency</h2><p>Event types in the current window</p></header>
+      <canvas id="classChart"></canvas>
+    </article>
+  </section>
 
-    <article class="card span5">
-      <h2>AI Station Agent</h2>
-      <div class="quick">
+  <!-- AGENT + TABLE -->
+  <section class="lower-grid">
+    <article class="agent-card">
+      <header class="agent-header">
+        <div>
+          <span class="eyebrow">Station analyst</span>
+          <h2>Ask the array</h2>
+        </div>
+        <span class="agent-pulse" id="agentPulse" aria-hidden="true"></span>
+      </header>
+      <div class="quick-row" id="quickRow">
         <button data-question="Summarize the current station data">Summarize</button>
-        <button data-question="What was the strongest event?">Strongest</button>
+        <button data-question="What was the strongest event?">Strongest event</button>
         <button data-question="Is the validation error acceptable?">Validation</button>
-        <button data-question="Are the sensors agreeing?">Agreement</button>
-        <button data-question="How should I tune thresholds?">Tune</button>
+        <button data-question="Are the sensors agreeing?">Sensor agreement</button>
+        <button data-question="How should I tune thresholds?">Tune thresholds</button>
       </div>
       <div id="chatLog" class="chat-log">
-        <p class="agent"><b>Agent:</b> Ask me about loaded events, strongest shaking, validation error, sensor agreement, or tuning.</p>
+        <div class="chat-msg chat-msg--agent">
+          <span class="chat-tag">Agent</span>
+          <p>Ask me about loaded events, strongest shaking, validation error, sensor agreement, or threshold tuning.</p>
+        </div>
       </div>
-      <div class="agent-row">
-        <input id="agentInput" placeholder="Ask the station agent..." />
-        <button id="askBtn">Ask</button>
-      </div>
+      <form class="agent-row" id="agentForm">
+        <input id="agentInput" placeholder="Ask the station agent&hellip;" autocomplete="off" />
+        <button id="askBtn" type="submit" class="btn btn-primary">Ask</button>
+      </form>
     </article>
 
-    <article class="card span7">
-      <h2>Event Table</h2>
+    <article class="table-card">
+      <header>
+        <span class="eyebrow">Event log</span>
+        <h2>Recent detections</h2>
+      </header>
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Time</th><th>Class</th><th>PGA</th><th>MMI</th><th>Distance</th><th>Mag</th><th>ADXL</th><th>LIS</th><th>MPU</th><th>Error</th></tr>
+            <tr>
+              <th>Time</th><th>Class</th><th>PGA</th><th>MMI</th><th>Dist.</th><th>Mag</th>
+              <th title="ADXL345 STA/LTA">ADXL</th><th title="LIS3DH STA/LTA">LIS</th><th title="MPU6050 STA/LTA">MPU</th><th>Error</th>
+            </tr>
           </thead>
-          <tbody id="rows"><tr><td colspan="10">No data loaded</td></tr></tbody>
+          <tbody id="rows"><tr><td colspan="10" class="empty-state">No data loaded yet</td></tr></tbody>
         </table>
       </div>
     </article>
   </section>
+
+  <footer class="site-foot">
+    <p>TremorLab station array &middot; ADXL345 + LIS3DH + MPU6050 &middot; adaptive STA/LTA &middot; live since page load</p>
+  </footer>
+
 </main>
+
 <script src="/app.js"></script>
 </body>
 </html>
-
