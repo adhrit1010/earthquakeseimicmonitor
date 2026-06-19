@@ -9,6 +9,11 @@ Pure Python standard-library backend:
 - Provides a secure AI agent endpoint using OpenAI Responses API
 
 No API keys are exposed to the browser.
+
+This module exposes plain functions (get_status, get_events, get_analytics,
+post_agent) that contain all the logic, plus:
+  - AppHandler: a BaseHTTPRequestHandler for local `python server.py` runs
+  - app: a WSGI application for Vercel's Python runtime (api/*.py import this)
 """
 
 from __future__ import annotations
@@ -54,24 +59,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANO
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
 PORT = int(os.getenv("PORT", "8787"))
-
-
-def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
-    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Content-Length", str(len(data)))
-    handler.end_headers()
-    handler.wfile.write(data)
-
-
-def read_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    length = int(handler.headers.get("Content-Length", "0") or "0")
-    if length <= 0:
-        return {}
-    raw = handler.rfile.read(length).decode("utf-8")
-    return json.loads(raw) if raw else {}
 
 
 def http_json(url: str, headers: dict[str, str], method: str = "GET", body: Any = None) -> Any:
@@ -137,6 +124,15 @@ def estimate_mmi(pga: float) -> float:
     if pga < 400:
         return 7
     return 8
+
+
+def safe_num(value: Any, default: float = -1.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def confidence_to_error(value: Any) -> float:
@@ -223,15 +219,6 @@ def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, A
     if isinstance(live, list):
         return [normalize_live_station(row) for row in live]
     return []
-
-
-def safe_num(value: Any, default: float = -1.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -371,8 +358,62 @@ def openai_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
             if parts:
                 return "\n".join(parts)
         return "The AI model returned an unexpected response shape. The backend local analyst is still available."
-    except Exception as exc:
+    except Exception:
         return f"AI request failed, so I used local analysis instead. {local_agent_answer(question, rows, summary)}"
+
+
+# ---------------------------------------------------------------------------
+# Route logic, shared by both the local stdlib server and the Vercel WSGI app
+# ---------------------------------------------------------------------------
+
+def get_status() -> dict[str, Any]:
+    return {
+        "supabaseConfigured": bool(SUPABASE_URL and SUPABASE_KEY),
+        "openaiConfigured": bool(OPENAI_API_KEY),
+        "model": OPENAI_MODEL,
+    }
+
+
+def get_events(query_params: dict[str, list[str]]) -> dict[str, Any]:
+    rows = fetch_events(query_params)
+    return {"events": rows}
+
+
+def get_analytics(query_params: dict[str, list[str]]) -> dict[str, Any]:
+    rows = fetch_events(query_params)
+    return {"summary": summarize_events(rows), "events": rows}
+
+
+def post_agent(body: dict[str, Any]) -> dict[str, Any]:
+    question = str(body.get("message", "")).strip()
+    filters = body.get("filters") if isinstance(body.get("filters"), dict) else {}
+    params = {k: [str(v)] for k, v in filters.items() if v not in (None, "")}
+    rows = fetch_events(params)
+    summary = summarize_events(rows)
+    answer = openai_agent_answer(question, rows, summary)
+    return {"answer": answer, "summary": summary, "usedOpenAI": bool(OPENAI_API_KEY)}
+
+
+# ---------------------------------------------------------------------------
+# Local development server (python server.py)
+# ---------------------------------------------------------------------------
+
+def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def read_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    length = int(handler.headers.get("Content-Length", "0") or "0")
+    if length <= 0:
+        return {}
+    raw = handler.rfile.read(length).decode("utf-8")
+    return json.loads(raw) if raw else {}
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -384,23 +425,17 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/status":
-            json_response(self, 200, {
-                "supabaseConfigured": bool(SUPABASE_URL and SUPABASE_KEY),
-                "openaiConfigured": bool(OPENAI_API_KEY),
-                "model": OPENAI_MODEL,
-            })
+            json_response(self, 200, get_status())
             return
         if parsed.path == "/api/events":
             try:
-                rows = fetch_events(parse_qs(parsed.query))
-                json_response(self, 200, {"events": rows})
+                json_response(self, 200, get_events(parse_qs(parsed.query)))
             except Exception as exc:
                 json_response(self, 500, {"error": str(exc)})
             return
         if parsed.path == "/api/analytics":
             try:
-                rows = fetch_events(parse_qs(parsed.query))
-                json_response(self, 200, {"summary": summarize_events(rows), "events": rows})
+                json_response(self, 200, get_analytics(parse_qs(parsed.query)))
             except Exception as exc:
                 json_response(self, 500, {"error": str(exc)})
             return
@@ -413,13 +448,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         try:
             body = read_body(self)
-            question = str(body.get("message", "")).strip()
-            filters = body.get("filters") if isinstance(body.get("filters"), dict) else {}
-            params = {k: [str(v)] for k, v in filters.items() if v not in (None, "")}
-            rows = fetch_events(params)
-            summary = summarize_events(rows)
-            answer = openai_agent_answer(question, rows, summary)
-            json_response(self, 200, {"answer": answer, "summary": summary, "usedOpenAI": bool(OPENAI_API_KEY)})
+            json_response(self, 200, post_agent(body))
         except Exception as exc:
             traceback.print_exc()
             json_response(self, 500, {"error": str(exc)})
@@ -446,6 +475,52 @@ def main() -> None:
     print(f"TriAxis dynamic website running at http://127.0.0.1:{PORT}")
     print("Press Ctrl+C to stop.")
     server.serve_forever()
+
+
+# ---------------------------------------------------------------------------
+# WSGI app for Vercel's Python runtime (imported by api/*.py)
+# ---------------------------------------------------------------------------
+
+def _wsgi_json(status: int, payload: Any, start_response) -> list[bytes]:
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    status_line = f"{status} {('OK' if status == 200 else 'ERROR')}"
+    start_response(status_line, [
+        ("Content-Type", "application/json; charset=utf-8"),
+        ("Cache-Control", "no-store"),
+        ("Content-Length", str(len(data))),
+    ])
+    return [data]
+
+
+def app(environ: dict[str, Any], start_response) -> list[bytes]:
+    """Single WSGI entrypoint. Each api/*.py file imports this directly."""
+    path = environ.get("PATH_INFO", "/")
+    method = environ.get("REQUEST_METHOD", "GET")
+    query_params = parse_qs(environ.get("QUERY_STRING", ""))
+
+    try:
+        if method == "GET" and path == "/api/status":
+            return _wsgi_json(200, get_status(), start_response)
+
+        if method == "GET" and path == "/api/events":
+            return _wsgi_json(200, get_events(query_params), start_response)
+
+        if method == "GET" and path == "/api/analytics":
+            return _wsgi_json(200, get_analytics(query_params), start_response)
+
+        if method == "POST" and path == "/api/agent":
+            try:
+                length = int(environ.get("CONTENT_LENGTH") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            raw = environ["wsgi.input"].read(length) if length > 0 else b""
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+            return _wsgi_json(200, post_agent(body), start_response)
+
+        return _wsgi_json(404, {"error": "Not found"}, start_response)
+    except Exception as exc:
+        traceback.print_exc()
+        return _wsgi_json(500, {"error": str(exc)}, start_response)
 
 
 if __name__ == "__main__":
