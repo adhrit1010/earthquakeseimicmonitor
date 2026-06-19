@@ -134,6 +134,164 @@ def safe_num(value: Any, default: float = -1.0) -> float:
     except (TypeError, ValueError):
         return default
 
+def pearson_correlation(a: list[float], b: list[float]) -> float:
+    """Pearson correlation coefficient between two equal-length lists.
+    Returns 0 if either series has no variance or fewer than 2 points."""
+    n = len(a)
+    if n < 2 or n != len(b):
+        return 0.0
+    mean_a = sum(a) / n
+    mean_b = sum(b) / n
+    cov = sum((a[i] - mean_a) * (b[i] - mean_b) for i in range(n))
+    var_a = sum((x - mean_a) ** 2 for x in a)
+    var_b = sum((x - mean_b) ** 2 for x in b)
+    denom = (var_a * var_b) ** 0.5
+    if denom == 0:
+        return 0.0
+    return max(-1.0, min(1.0, cov / denom))
+
+
+def sensor_agreement(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pairwise correlation between the three STA/LTA channels, plus a single
+    0-100 agreement score. Only uses rows where all three channels are
+    present (>= 0); falls back to 'insufficient data' below 3 such rows."""
+    adxl, lis, mpu = [], [], []
+    for r in rows:
+        a = safe_num(r.get("adxl345_stalta"), -1)
+        l = safe_num(r.get("lis3dh_stalta"), -1)
+        m = safe_num(r.get("mpu6050_stalta"), -1)
+        if a >= 0 and l >= 0 and m >= 0:
+            adxl.append(a)
+            lis.append(l)
+            mpu.append(m)
+
+    if len(adxl) < 3:
+        return {
+            "available": False,
+            "sampleSize": len(adxl),
+            "agreementScore": None,
+            "pairwise": None,
+        }
+
+    r_al = pearson_correlation(adxl, lis)
+    r_am = pearson_correlation(adxl, mpu)
+    r_lm = pearson_correlation(lis, mpu)
+    avg_r = (r_al + r_am + r_lm) / 3
+    # Map correlation [-1, 1] to a 0-100 agreement score, clamped.
+    agreement_score = max(0.0, min(100.0, (avg_r + 1) * 50))
+
+    return {
+        "available": True,
+        "sampleSize": len(adxl),
+        "agreementScore": agreement_score,
+        "pairwise": {
+            "adxl345_lis3dh": r_al,
+            "adxl345_mpu6050": r_am,
+            "lis3dh_mpu6050": r_lm,
+        },
+    }
+
+
+def wave_quality_score(row: dict[str, Any]) -> float:
+    """0-100 score for how clean a P/S detection looks, from timing and
+    validation error. Returns -1 if there isn't enough info to judge."""
+    p_ms = safe_num(row.get("p_wave_ms"), -1)
+    s_ms = safe_num(row.get("s_wave_ms"), -1)
+    validation_error = safe_num(row.get("validation_error"), -1)
+    if p_ms < 0 or s_ms < 0:
+        return -1
+    gap = s_ms - p_ms
+    # A physically plausible P-S gap for a near-field demo rig is treated as
+    # a positive signal; an inverted or zero gap is treated as noise.
+    timing_score = 100.0 if gap > 0 else 30.0
+    if validation_error >= 0:
+        timing_score = max(0.0, timing_score - validation_error * 0.5)
+    return max(0.0, min(100.0, timing_score))
+
+
+def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) -> dict[str, Any]:
+    """Composite 0-100 confidence score blending sensor agreement, STA/LTA
+    strength, and P/S wave quality across the loaded window. This is a
+    heuristic for a demo rig, not a calibrated seismological estimate."""
+    if not rows:
+        return {"score": None, "label": None, "components": None}
+
+    stalta_vals = []
+    for r in rows:
+        merged = max(
+            safe_num(r.get("adxl345_stalta"), -1),
+            safe_num(r.get("lis3dh_stalta"), -1),
+            safe_num(r.get("mpu6050_stalta"), -1),
+        )
+        if merged >= 0:
+            stalta_vals.append(merged)
+    # STA/LTA ratios well above 1 indicate a strong trigger; normalize against
+    # a ratio of 5 representing a very strong, unambiguous trigger.
+    stalta_score = 0.0
+    if stalta_vals:
+        avg_stalta = sum(stalta_vals) / len(stalta_vals)
+        stalta_score = max(0.0, min(100.0, (avg_stalta - 1) / 4 * 100))
+
+    wave_scores = [wave_quality_score(r) for r in rows]
+    wave_scores = [w for w in wave_scores if w >= 0]
+    wave_score = sum(wave_scores) / len(wave_scores) if wave_scores else None
+
+    agreement_score = agreement.get("agreementScore")
+
+    parts = []
+    weights = []
+    if agreement_score is not None:
+        parts.append(agreement_score)
+        weights.append(0.4)
+    parts.append(stalta_score)
+    weights.append(0.35 if agreement_score is not None else 0.6)
+    if wave_score is not None:
+        parts.append(wave_score)
+        weights.append(0.25)
+
+    total_weight = sum(weights)
+    score = sum(p * w for p, w in zip(parts, weights)) / total_weight if total_weight else None
+
+    label = None
+    if score is not None:
+        if score < 35:
+            label = "LOW"
+        elif score < 60:
+            label = "MEDIUM"
+        elif score < 85:
+            label = "HIGH"
+        else:
+            label = "VERY HIGH"
+
+    return {
+        "score": score,
+        "label": label,
+        "components": {
+            "sensorAgreement": agreement_score,
+            "staltaStrength": stalta_score,
+            "waveQuality": wave_score,
+        },
+    }
+
+
+def severity_from_pga(pga: float, mmi: float) -> dict[str, Any]:
+    """Maps peak PGA / MMI to a five-step severity label for the gauge.
+    Thresholds are tuned for a tabletop/demo simulator, not field-deployed
+    instrumentation -- treat as relative, not a real hazard classification."""
+    if pga < 0:
+        return {"level": None, "label": None, "fraction": 0.0}
+    if pga < 5:
+        level, label = 1, "Minor"
+    elif pga < 25:
+        level, label = 2, "Weak"
+    elif pga < 80:
+        level, label = 3, "Moderate"
+    elif pga < 250:
+        level, label = 4, "Strong"
+    else:
+        level, label = 5, "Severe"
+    return {"level": level, "label": label, "fraction": level / 5}
+
 
 def confidence_to_error(value: Any) -> float:
     confidence = safe_num(value, -1)
