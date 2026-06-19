@@ -381,16 +381,23 @@ def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, A
 
 def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
-        return {
-            "count": 0,
-            "peakPga": None,
-            "maxMagnitude": None,
-            "avgValidationError": None,
-            "classCounts": {},
-            "strongest": None,
-            "qualityScore": None,
-            "suggestedAction": "Load or record seismic events first.",
-        }
+       agreement = sensor_agreement(rows)
+       confidence = seismic_confidence(rows, agreement)
+       severity = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
+
+    return {
+        "count": len(rows),
+        "peakPga": peak_pga,
+        "maxMagnitude": max_mag,
+        "avgValidationError": avg_error,
+        "classCounts": class_counts,
+        "strongest": strongest,
+        "qualityScore": quality,
+        "suggestedAction": action,
+        "sensorAgreement": agreement,
+        "confidence": confidence,
+        "severity": severity,
+    }
     class_counts: dict[str, int] = {}
     for row in rows:
         cls = str(row.get("classification") or "Unknown")
