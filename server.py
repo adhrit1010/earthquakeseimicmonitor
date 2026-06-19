@@ -378,26 +378,22 @@ def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, A
         return [normalize_live_station(row) for row in live]
     return []
 
-
 def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
-       agreement = sensor_agreement(rows)
-       confidence = seismic_confidence(rows, agreement)
-       severity = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
+        return {
+            "count": 0,
+            "peakPga": None,
+            "maxMagnitude": None,
+            "avgValidationError": None,
+            "classCounts": {},
+            "strongest": None,
+            "qualityScore": None,
+            "suggestedAction": "Load or record seismic events first.",
+            "sensorAgreement": sensor_agreement(rows),
+            "confidence": seismic_confidence(rows, sensor_agreement(rows)),
+            "severity": severity_from_pga(-1, -1),
+        }
 
-    return {
-        "count": len(rows),
-        "peakPga": peak_pga,
-        "maxMagnitude": max_mag,
-        "avgValidationError": avg_error,
-        "classCounts": class_counts,
-        "strongest": strongest,
-        "qualityScore": quality,
-        "suggestedAction": action,
-        "sensorAgreement": agreement,
-        "confidence": confidence,
-        "severity": severity,
-    }
     class_counts: dict[str, int] = {}
     for row in rows:
         cls = str(row.get("classification") or "Unknown")
@@ -428,6 +424,10 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     else:
         action = "Data is consistent for demonstration. Continue collecting test runs."
 
+    agreement = sensor_agreement(rows)
+    confidence = seismic_confidence(rows, agreement)
+    severity = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
+
     return {
         "count": len(rows),
         "peakPga": peak_pga,
@@ -437,7 +437,11 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "strongest": strongest,
         "qualityScore": quality,
         "suggestedAction": action,
+        "sensorAgreement": agreement,
+        "confidence": confidence,
+        "severity": severity,
     }
+
 
 
 def local_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
