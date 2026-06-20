@@ -676,7 +676,6 @@ def _wsgi_json(status: int, payload: Any, start_response) -> list[bytes]:
 
 
 def app(environ: dict[str, Any], start_response) -> list[bytes]:
-    """Single WSGI entrypoint. Each api/*.py file imports this directly."""
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET")
     query_params = parse_qs(environ.get("QUERY_STRING", ""))
@@ -692,16 +691,16 @@ def app(environ: dict[str, Any], start_response) -> list[bytes]:
             return _wsgi_json(200, get_analytics(query_params), start_response)
 
         if method == "POST" and path == "/api/agent":
-    try:
-        length = int(environ.get("CONTENT_LENGTH") or 0)
-    except (TypeError, ValueError):
-        length = 0
-    try:
-        raw = environ["wsgi.input"].read(length) if length > 0 else b""
-        body = json.loads(raw.decode("utf-8")) if raw else {}
-    except Exception:
-        body = {}
-    return _wsgi_json(200, post_agent(body), start_response)
+            try:
+                length = int(environ.get("CONTENT_LENGTH") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            try:
+                raw = environ["wsgi.input"].read(length) if length > 0 else b""
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except Exception:
+                body = {}
+            return _wsgi_json(200, post_agent(body), start_response)
 
         return _wsgi_json(404, {"error": "Not found"}, start_response)
     except Exception as exc:
