@@ -34,7 +34,7 @@ from urllib.error import HTTPError, URLError
 
 
 ROOT = Path(__file__).resolve().parent
-PUBLIC = ROOT / "public"
+PUBLIC = ROOT 
 
 
 def load_env() -> None:
