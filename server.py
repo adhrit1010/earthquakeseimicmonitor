@@ -9,11 +9,6 @@ Pure Python standard-library backend:
 - Provides a secure AI agent endpoint using Google's Gemini API
 
 No API keys are exposed to the browser.
-
-This module exposes plain functions (get_status, get_events, get_analytics,
-post_agent) that contain all the logic, plus:
-  - AppHandler: a BaseHTTPRequestHandler for local `python server.py` runs
-  - app: a WSGI application for Vercel's Python runtime (api/*.py import this)
 """
 
 from __future__ import annotations
@@ -30,11 +25,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse, parse_qs, quote
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 
 
 ROOT = Path(__file__).resolve().parent
-PUBLIC = ROOT  # static files (index.html, styles.css, app.js, ...) live at repo root
+PUBLIC = ROOT
 
 
 def load_env() -> None:
@@ -52,7 +47,6 @@ def load_env() -> None:
             os.environ.setdefault(key, value)
     except Exception:
         pass
-  
 
 
 load_env()
@@ -140,8 +134,6 @@ def safe_num(value: Any, default: float = -1.0) -> float:
 
 
 def pearson_correlation(a: list[float], b: list[float]) -> float:
-    """Pearson correlation coefficient between two equal-length lists.
-    Returns 0 if either series has no variance or fewer than 2 points."""
     n = len(a)
     if n < 2 or n != len(b):
         return 0.0
@@ -157,9 +149,6 @@ def pearson_correlation(a: list[float], b: list[float]) -> float:
 
 
 def sensor_agreement(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pairwise correlation between the three STA/LTA channels, plus a single
-    0-100 agreement score. Only uses rows where all three channels are
-    present (>= 0); falls back to 'insufficient data' below 3 such rows."""
     adxl, lis, mpu = [], [], []
     for r in rows:
         a = safe_num(r.get("adxl345_stalta"), -1)
@@ -197,8 +186,6 @@ def sensor_agreement(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def wave_quality_score(row: dict[str, Any]) -> float:
-    """0-100 score for how clean a P/S detection looks, from timing and
-    validation error. Returns -1 if there isn't enough info to judge."""
     p_ms = safe_num(row.get("p_wave_ms"), -1)
     s_ms = safe_num(row.get("s_wave_ms"), -1)
     validation_error = safe_num(row.get("validation_error"), -1)
@@ -212,9 +199,6 @@ def wave_quality_score(row: dict[str, Any]) -> float:
 
 
 def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) -> dict[str, Any]:
-    """Composite 0-100 confidence score blending sensor agreement, STA/LTA
-    strength, and P/S wave quality across the loaded window. This is a
-    heuristic for a demo rig, not a calibrated seismological estimate."""
     if not rows:
         return {"score": None, "label": None, "components": None}
 
@@ -227,6 +211,7 @@ def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) ->
         )
         if merged >= 0:
             stalta_vals.append(merged)
+
     stalta_score = 0.0
     if stalta_vals:
         avg_stalta = sum(stalta_vals) / len(stalta_vals)
@@ -238,8 +223,8 @@ def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) ->
 
     agreement_score = agreement.get("agreementScore")
 
-    parts = []
-    weights = []
+    parts: list[float] = []
+    weights: list[float] = []
     if agreement_score is not None:
         parts.append(agreement_score)
         weights.append(0.4)
@@ -275,9 +260,6 @@ def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) ->
 
 
 def severity_from_pga(pga: float, mmi: float) -> dict[str, Any]:
-    """Maps peak PGA / MMI to a five-step severity label for the gauge.
-    Thresholds are tuned for a tabletop/demo simulator, not field-deployed
-    instrumentation -- treat as relative, not a real hazard classification."""
     if pga < 0:
         return {"level": None, "label": None, "fraction": 0.0}
     if pga < 5:
@@ -491,9 +473,6 @@ def compact_context(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
 
 
 def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
-    """Calls Google's Gemini API directly (generateContent endpoint).
-    Falls back to the local deterministic analyst if no key is set, the
-    call fails, or the response shape is unexpected."""
     if not GEMINI_API_KEY:
         return local_agent_answer(question, rows, summary)
 
@@ -505,18 +484,8 @@ def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
     user_prompt = f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
 
     body = {
-        "system_instruction": {
-            "parts": [{"text": system_instruction}],
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": user_prompt}],
-            }
-        ],
-    }
-    headers = {
-        "Content-Type": "application/json",
+        "system_instruction": {"parts": [{"text": system_instruction}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
     }
     model = quote(GEMINI_MODEL, safe="")
     url = (
@@ -524,7 +493,7 @@ def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
         f"?key={GEMINI_API_KEY}"
     )
     try:
-        response = http_json(url, headers, method="POST", body=body)
+        response = http_json(url, {"Content-Type": "application/json"}, method="POST", body=body)
         if isinstance(response, dict):
             candidates = response.get("candidates") or []
             if candidates:
@@ -539,7 +508,7 @@ def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
 
 
 # ---------------------------------------------------------------------------
-# Route logic, shared by both the local stdlib server and the Vercel WSGI app
+# Route logic
 # ---------------------------------------------------------------------------
 
 def get_status() -> dict[str, Any]:
@@ -571,7 +540,7 @@ def post_agent(body: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Local development server (python server.py)
+# Local development server
 # ---------------------------------------------------------------------------
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
@@ -654,12 +623,12 @@ def main() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WSGI app for Vercel's Python runtime (imported by api/*.py)
+# WSGI app for Vercel
 # ---------------------------------------------------------------------------
 
 def _wsgi_json(status: int, payload: Any, start_response) -> list[bytes]:
     data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    status_line = f"{status} {('OK' if status == 200 else 'ERROR')}"
+    status_line = f"{status} {'OK' if status == 200 else 'ERROR'}"
     start_response(status_line, [
         ("Content-Type", "application/json; charset=utf-8"),
         ("Cache-Control", "no-store"),
@@ -696,6 +665,7 @@ def app(environ: dict[str, Any], start_response) -> list[bytes]:
             return _wsgi_json(200, post_agent(body), start_response)
 
         return _wsgi_json(404, {"error": "Not found"}, start_response)
+
     except Exception as exc:
         traceback.print_exc()
         return _wsgi_json(500, {"error": str(exc)}, start_response)
