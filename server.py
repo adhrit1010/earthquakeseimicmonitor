@@ -503,8 +503,8 @@ def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
                 if texts:
                     return "\n".join(texts)
         return "The AI model returned an unexpected response shape. The backend local analyst is still available."
-    except Exception:
-        return f"AI request failed, so I used local analysis instead. {local_agent_answer(question, rows, summary)}"
+    except Exception as exc:
+        return f"AI request failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
