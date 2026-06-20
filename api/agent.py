@@ -1,4 +1,4 @@
-﻿import json, sys, os, traceback
+import json, sys, os, traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from server import post_agent, _wsgi_json
 

@@ -1,4 +1,4 @@
-﻿import sys, os
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from server import get_analytics, _wsgi_json, parse_qs
 
