@@ -1,7 +1,0 @@
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from server import get_events, _wsgi_json, parse_qs
-
-def handler(environ, start_response):
-    params = parse_qs(environ.get("QUERY_STRING", ""))
-    return _wsgi_json(200, get_events(params), start_response)
