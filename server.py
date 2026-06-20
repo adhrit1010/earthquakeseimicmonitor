@@ -3,10 +3,10 @@
 TriAxis Dynamic Website Backend
 
 Pure Python standard-library backend:
-- Serves the frontend from ./public
+- Serves the frontend from the repo root (index.html, styles.css, app.js, etc.)
 - Reads Supabase data server-side
 - Provides analytics endpoints
-- Provides a secure AI agent endpoint using OpenAI Responses API
+- Provides a secure AI agent endpoint using Google's Gemini API
 
 No API keys are exposed to the browser.
 
@@ -28,13 +28,13 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode, urlparse, parse_qs, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 
 ROOT = Path(__file__).resolve().parent
-PUBLIC = ROOT 
+PUBLIC = ROOT  # static files (index.html, styles.css, app.js, ...) live at repo root
 
 
 def load_env() -> None:
@@ -56,8 +56,8 @@ load_env()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 PORT = int(os.getenv("PORT", "8787"))
 
 
@@ -81,7 +81,7 @@ def http_json(url: str, headers: dict[str, str], method: str = "GET", body: Any 
         message = payload.get("message") if isinstance(payload, dict) else ""
         code = payload.get("code") if isinstance(payload, dict) else ""
         detail = f"{code}: {message}" if code and message else message or raw or exc.reason
-        raise RuntimeError(f"Supabase/OpenAI HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(f"Supabase/Gemini HTTP {exc.code}: {detail}") from exc
 
 
 def supabase_headers() -> dict[str, str]:
@@ -134,6 +134,7 @@ def safe_num(value: Any, default: float = -1.0) -> float:
     except (TypeError, ValueError):
         return default
 
+
 def pearson_correlation(a: list[float], b: list[float]) -> float:
     """Pearson correlation coefficient between two equal-length lists.
     Returns 0 if either series has no variance or fewer than 2 points."""
@@ -177,7 +178,6 @@ def sensor_agreement(rows: list[dict[str, Any]]) -> dict[str, Any]:
     r_am = pearson_correlation(adxl, mpu)
     r_lm = pearson_correlation(lis, mpu)
     avg_r = (r_al + r_am + r_lm) / 3
-    # Map correlation [-1, 1] to a 0-100 agreement score, clamped.
     agreement_score = max(0.0, min(100.0, (avg_r + 1) * 50))
 
     return {
@@ -201,8 +201,6 @@ def wave_quality_score(row: dict[str, Any]) -> float:
     if p_ms < 0 or s_ms < 0:
         return -1
     gap = s_ms - p_ms
-    # A physically plausible P-S gap for a near-field demo rig is treated as
-    # a positive signal; an inverted or zero gap is treated as noise.
     timing_score = 100.0 if gap > 0 else 30.0
     if validation_error >= 0:
         timing_score = max(0.0, timing_score - validation_error * 0.5)
@@ -225,8 +223,6 @@ def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) ->
         )
         if merged >= 0:
             stalta_vals.append(merged)
-    # STA/LTA ratios well above 1 indicate a strong trigger; normalize against
-    # a ratio of 5 representing a very strong, unambiguous trigger.
     stalta_score = 0.0
     if stalta_vals:
         avg_stalta = sum(stalta_vals) / len(stalta_vals)
@@ -378,6 +374,7 @@ def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, A
         return [normalize_live_station(row) for row in live]
     return []
 
+
 def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {
@@ -443,7 +440,6 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-
 def local_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
     q = question.lower()
     if not rows:
@@ -490,42 +486,49 @@ def compact_context(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
     )
 
 
-def openai_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
-    if not OPENAI_API_KEY:
+def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
+    """Calls Google's Gemini API directly (generateContent endpoint).
+    Falls back to the local deterministic analyst if no key is set, the
+    call fails, or the response shape is unexpected."""
+    if not GEMINI_API_KEY:
         return local_agent_answer(question, rows, summary)
+
+    system_instruction = (
+        "You are TriAxis Station Analyst, a careful seismic instrumentation assistant. "
+        "Answer only from the provided station data. Be concise, quantitative, and practical. "
+        "If data is missing, say what is missing. Do not claim real earthquake certainty from a school/demo sensor."
+    )
+    user_prompt = f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
+
     body = {
-        "model": OPENAI_MODEL,
-        "input": [
-            {
-                "role": "system",
-                "content": (
-                    "You are TriAxis Station Analyst, a careful seismic instrumentation assistant. "
-                    "Answer only from the provided station data. Be concise, quantitative, and practical. "
-                    "If data is missing, say what is missing. Do not claim real earthquake certainty from a school/demo sensor."
-                ),
-            },
+        "system_instruction": {
+            "parts": [{"text": system_instruction}],
+        },
+        "contents": [
             {
                 "role": "user",
-                "content": f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}",
-            },
+                "parts": [{"text": user_prompt}],
+            }
         ],
     }
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+    model = quote(GEMINI_MODEL, safe="")
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
     try:
-        response = http_json("https://api.openai.com/v1/responses", headers, method="POST", body=body)
+        response = http_json(url, headers, method="POST", body=body)
         if isinstance(response, dict):
-            if isinstance(response.get("output_text"), str):
-                return response["output_text"]
-            parts: list[str] = []
-            for item in response.get("output", []) or []:
-                for content in item.get("content", []) or []:
-                    if content.get("type") in ("output_text", "text") and "text" in content:
-                        parts.append(str(content["text"]))
-            if parts:
-                return "\n".join(parts)
+            candidates = response.get("candidates") or []
+            if candidates:
+                content = candidates[0].get("content") or {}
+                parts = content.get("parts") or []
+                texts = [p.get("text") for p in parts if isinstance(p, dict) and p.get("text")]
+                if texts:
+                    return "\n".join(texts)
         return "The AI model returned an unexpected response shape. The backend local analyst is still available."
     except Exception:
         return f"AI request failed, so I used local analysis instead. {local_agent_answer(question, rows, summary)}"
@@ -538,8 +541,8 @@ def openai_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
 def get_status() -> dict[str, Any]:
     return {
         "supabaseConfigured": bool(SUPABASE_URL and SUPABASE_KEY),
-        "openaiConfigured": bool(OPENAI_API_KEY),
-        "model": OPENAI_MODEL,
+        "openaiConfigured": bool(GEMINI_API_KEY),
+        "model": GEMINI_MODEL,
     }
 
 
@@ -559,8 +562,8 @@ def post_agent(body: dict[str, Any]) -> dict[str, Any]:
     params = {k: [str(v)] for k, v in filters.items() if v not in (None, "")}
     rows = fetch_events(params)
     summary = summarize_events(rows)
-    answer = openai_agent_answer(question, rows, summary)
-    return {"answer": answer, "summary": summary, "usedOpenAI": bool(OPENAI_API_KEY)}
+    answer = gemini_agent_answer(question, rows, summary)
+    return {"answer": answer, "summary": summary, "usedOpenAI": bool(GEMINI_API_KEY)}
 
 
 # ---------------------------------------------------------------------------
