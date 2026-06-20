@@ -1,21 +1,3 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "builds": [
-    { "src": "index.html", "use": "@vercel/static" },
-    { "src": "styles.css", "use": "@vercel/static" },
-    { "src": "app.js", "use": "@vercel/static" },
-    { "src": "analytics-widgets.js", "use": "@vercel/static" },
-    { "src": "analytics-widgets.css", "use": "@vercel/static" },
-    { "src": "metrics-panel.js", "use": "@vercel/static" },
-    { "src": "metrics-panel.css", "use": "@vercel/static" },
-    { "src": "history.html", "use": "@vercel/static" },
-    { "src": "history.js", "use": "@vercel/static" },
-    { "src": "history.css", "use": "@vercel/static" },
-    { "src": "api/*.py", "use": "@vercel/python" }
-  ],
-  "routes": [
-    { "src": "/api/(.*)", "dest": "/api/$1" },
-    { "src": "/", "dest": "/index.html" },
-    { "src": "/(.*)", "dest": "/$1" }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json"
 }
