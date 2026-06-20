@@ -282,6 +282,8 @@ function render(data) {
     if (fresh.length) state.helicorderBuffer = state.helicorderBuffer.slice(0, -fresh.length).concat(fresh);
   }
   updateLiveReadout(summary, rows);
+  if (typeof renderAdvancedAnalytics === 'function') renderAdvancedAnalytics(summary);
+  if (typeof renderExpandedMetrics === 'function') renderExpandedMetrics(summary, rows);
 }
 
 async function loadData() {
