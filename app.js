@@ -290,12 +290,10 @@ async function loadData() {
   try {
     const status = await fetchJson('/api/status');
     setCloud(status.supabaseConfigured, status.supabaseConfigured ? 'Backend online' : 'Configure Supabase');
-    el('status').textContent = `Backend ready \u00b7 AI ${status.openaiConfigured ? 'OpenAI enabled' : 'local fallback'} \u00b7 model ${status.model}`;
     const data = await fetchJson(`/api/analytics?${queryString(filters())}`);
     render(data);
   } catch (error) {
     setCloud(false, 'Backend error');
-    el('status').textContent = error.message;
   }
 }
 
