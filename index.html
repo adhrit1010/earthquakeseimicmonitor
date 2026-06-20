@@ -10,6 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/analytics-widgets.css" />
+  <link rel="stylesheet" href="/metrics-panel.css" />
 </head>
 <body>
 
@@ -28,6 +29,10 @@
         <p class="brand-sub">Station <span id="stationId">TX-01</span> &middot; Three-axis seismic array</p>
       </div>
     </div>
+    <nav class="top-nav">
+      <a href="/" class="active">Dashboard</a>
+      <a href="/history.html">History</a>
+    </nav>
     <div class="masthead-status">
       <div class="status-chip" id="cloudChip">
         <span class="status-dot" id="cloudDot"></span>
@@ -146,8 +151,39 @@
     </article>
   </section>
 
- 
- <!-- CHARTS -->
+  <!-- EXPANDED METRICS: seismic measurements, detection, waveform, timing, simulation, health, statistics -->
+  <section class="metrics-grid" aria-label="Expanded station metrics">
+    <article class="metrics-card" id="seismicMeasurementsCard">
+      <span class="eyebrow">Seismic measurements</span>
+      <p class="widget-empty">Waiting for data&hellip;</p>
+    </article>
+    <article class="metrics-card" id="detectionMetricsCard">
+      <span class="eyebrow">Detection metrics</span>
+      <p class="widget-empty">Waiting for data&hellip;</p>
+    </article>
+    <article class="metrics-card" id="waveformMetricsCard">
+      <span class="eyebrow">Waveform metrics</span>
+      <p class="widget-empty">Waiting for data&hellip;</p>
+    </article>
+    <article class="metrics-card" id="timingMetricsCard">
+      <span class="eyebrow">Timing metrics</span>
+      <p class="widget-empty">Waiting for data&hellip;</p>
+    </article>
+    <article class="metrics-card" id="simulationMetricsCard">
+      <span class="eyebrow">Simulation metrics</span>
+      <p class="widget-empty">Waiting for data&hellip;</p>
+    </article>
+    <article class="metrics-card" id="healthMetricsCard">
+      <span class="eyebrow">Alert &amp; health metrics</span>
+      <p class="widget-empty">Waiting for data&hellip;</p>
+    </article>
+    <article class="metrics-card" id="eventStatisticsCard">
+      <span class="eyebrow">Event statistics</span>
+      <p class="widget-empty">Waiting for data&hellip;</p>
+    </article>
+  </section>
+
+  <!-- CHARTS -->
   <section class="chart-grid">
     <article class="chart-card chart-card--wide">
       <header><h2>STA/LTA trends</h2><p>All three sensors, merged trigger ratio over time</p></header>
@@ -226,6 +262,7 @@
 </main>
 
 <script src="/analytics-widgets.js"></script>
+<script src="/metrics-panel.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
