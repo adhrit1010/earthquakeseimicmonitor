@@ -17,9 +17,9 @@
    =================================================================== */
 
 :root {
-  --depth-amber-glow: rgba(232, 196, 104, 0.18);
-  --depth-amber-edge: rgba(232, 196, 104, 0.5);
-  --depth-amber-faint: rgba(232, 196, 104, 0.08);
+  --depth-amber-glow: rgba(255, 207, 64, 0.2);
+  --depth-amber-edge: rgba(255, 207, 64, 0.55);
+  --depth-amber-faint: rgba(255, 207, 64, 0.1);
   --depth-shadow-ambient: rgba(0, 0, 0, 0.55);
   --depth-shadow-contact: rgba(0, 0, 0, 0.35);
   --depth-highlight: rgba(255, 252, 244, 0.06);
@@ -33,14 +33,14 @@
 .table-card {
   position: relative;
   background:
-    linear-gradient(165deg, rgba(255,255,255,0.05), rgba(255,255,255,0) 40%),
+    linear-gradient(165deg, rgba(255,255,255,0.045), rgba(255,255,255,0) 45%),
     var(--ink-panel);
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255,255,255,0.02);
   box-shadow:
     0 1px 0 0 var(--depth-highlight) inset,
-    0 -1px 0 0 rgba(0,0,0,0.4) inset,
-    0 22px 40px -16px var(--depth-shadow-ambient),
-    0 6px 14px -6px var(--depth-shadow-contact);
+    0 -1px 0 0 rgba(0,0,0,0.45) inset,
+    -9px -9px 20px rgba(255,255,255,0.025),
+    11px 11px 26px rgba(0,0,0,0.6);
   transition: box-shadow 0.25s ease, transform 0.25s ease, border-color 0.25s ease;
 }
 
@@ -54,40 +54,41 @@
   border-radius: inherit;
   padding: 1.2px;
   background: linear-gradient(140deg,
-    rgba(232,196,104,0.85) 0%,
-    rgba(232,196,104,0.15) 30%,
+    rgba(255,207,64,0.85) 0%,
+    rgba(255,207,64,0.15) 30%,
     rgba(35,43,48,0.9) 55%,
-    rgba(232,196,104,0.35) 100%);
+    rgba(255,207,64,0.35) 100%);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
   pointer-events: none;
-  opacity: 0.9;
+  opacity: 0.22;
   transition: opacity 0.25s ease;
 }
 
 .bento-card:hover,
 .gauge-card:hover,
 .metrics-card:hover {
-  transform: translateY(-2px);
+  transform: translateY(-3px);
   box-shadow:
     0 1px 0 0 var(--depth-highlight) inset,
-    0 26px 46px -18px var(--depth-shadow-ambient),
-    0 6px 14px -4px var(--depth-shadow-contact),
-    0 0 0 1px var(--depth-amber-faint);
+    0 0 0 1px var(--depth-amber-faint),
+    -12px -12px 26px rgba(255,255,255,0.035),
+    16px 16px 34px rgba(0,0,0,0.65);
 }
 
 .bento-card:hover::after,
 .gauge-card:hover::after,
 .metrics-card:hover::after {
-  opacity: 0.9;
+  opacity: 0.7;
 }
 
 .bento-card.dragging {
   box-shadow:
     0 1px 0 0 var(--depth-highlight) inset,
-    0 38px 64px -20px rgba(0,0,0,0.65),
-    0 0 0 1px var(--depth-amber-edge);
+    0 0 0 1px var(--depth-amber-edge),
+    -6px -6px 14px rgba(255,255,255,0.02),
+    20px 20px 40px rgba(0,0,0,0.7);
 }
 
 /* ===================== GLASS PANELS ===================== */
@@ -101,7 +102,7 @@
     linear-gradient(180deg, rgba(20,26,30,0.82), rgba(10,13,15,0.92));
   backdrop-filter: blur(18px) saturate(1.1);
   -webkit-backdrop-filter: blur(18px) saturate(1.1);
-  border: 1px solid rgba(232,196,104,0.16);
+  border: 1px solid rgba(255,207,64,0.18);
 }
 
 .masthead {
@@ -127,15 +128,40 @@
 
 .btn-primary {
   box-shadow:
-    2px 4px 10px rgba(232,196,104,0.25),
-    -1px -1px 3px rgba(255,255,255,0.08) inset;
+    2px 4px 10px rgba(255,207,64,0.3),
+    -1px -1px 3px rgba(255,255,255,0.1) inset;
 }
 
 .agent-fab {
   box-shadow:
-    0 10px 24px rgba(232,196,104,0.3),
+    0 10px 24px rgba(255,207,64,0.35),
     3px 4px 8px rgba(0,0,0,0.4),
     -1px -1px 3px rgba(255,255,255,0.1) inset;
+}
+
+/* Carved-in neumorphic fields: same surface color as the panel behind
+   them, with an inset shadow standing in for a border so they read as
+   pressed into the panel rather than boxed by a hairline. */
+input[type="date"],
+input[type="text"],
+input[type="number"],
+select,
+.agent-row input {
+  box-shadow:
+    inset 3px 3px 7px rgba(0,0,0,0.45),
+    inset -2px -2px 5px rgba(255,255,255,0.025);
+  border-color: transparent;
+}
+
+input[type="date"]:focus,
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus,
+.agent-row input:focus {
+  box-shadow:
+    inset 2px 2px 5px rgba(0,0,0,0.4),
+    inset -1px -1px 3px rgba(255,255,255,0.03),
+    0 0 0 1px var(--depth-amber-faint);
 }
 
 /* ===================== SCROLLYTELLING REVEAL ===================== */
