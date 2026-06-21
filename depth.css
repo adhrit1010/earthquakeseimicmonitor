@@ -1,20 +1,19 @@
 /* ===================================================================
-   depth.css
-   Adds dimensional treatment to existing cards without changing their
-   markup: layered shadow + gradient border + glass highlight on
-   .bento-card / .gauge-card / .metrics-card / .table-card, a soft
-   neumorphic press-state on buttons/toggles, and scroll-reveal hooks.
-   Built entirely from the existing TremorLab tokens in styles.css —
-   no new colors introduced.
+   depth.css (v3 — filter removed from .depth-bg svg)
 
-   FIX (v2): Removed backdrop-filter from .masthead. backdrop-filter
-   promotes an element to its own compositing layer in Chromium, which
-   can break position:fixed on later siblings — causing the agent FAB
-   and panel to appear at the left edge of the screen instead of the
-   bottom-right corner. The masthead already has a solid background
-   gradient, so removing the blur has no visible effect.
-   backdrop-filter is kept only on .agent-panel where it is needed for
-   the frosted-glass look on an explicitly non-fixed-sibling element.
+   CRITICAL FIX: The previous version had:
+     .depth-bg svg { filter: drop-shadow(...); }
+   
+   CSS `filter` on ANY element creates a new stacking context. When
+   applied to an element that appears before position:fixed elements
+   in the DOM paint order, it breaks their fixed positioning in
+   Chromium — they position relative to the document origin instead
+   of the viewport, landing in the top-left corner.
+
+   Fix: `filter` is completely removed from .depth-bg svg. The glow
+   effect is achieved with opacity alone, which does not create a
+   stacking context. depth.js also now appends .depth-bg at the end
+   of <body> rather than prepending it, as belt-and-suspenders.
    =================================================================== */
 
 :root {
@@ -94,14 +93,10 @@
 
 /* ===================== GLASS PANELS ===================== */
 
-/*
-  IMPORTANT: backdrop-filter is applied ONLY to .agent-panel here.
-  It was previously also on .masthead, which caused position:fixed to
-  break on the FAB and panel in Chromium — the browser treats any
-  backdrop-filter element as a compositing root, which can affect how
-  fixed siblings are positioned. The masthead uses a solid gradient
-  background so it looks identical without the blur.
-*/
+/* backdrop-filter only on .agent-panel — NOT on .masthead.
+   backdrop-filter also creates a stacking context; keeping it
+   off the masthead prevents it from breaking position:fixed
+   on the FAB and agent panel. */
 .agent-panel {
   background:
     linear-gradient(180deg, rgba(20,26,30,0.82), rgba(10,13,15,0.92));
@@ -110,7 +105,6 @@
   border: 1px solid rgba(232,196,104,0.16);
 }
 
-/* .masthead gets its look from styles.css gradient — no backdrop-filter needed */
 .masthead {
   background: linear-gradient(180deg, rgba(17,22,26,0.95), rgba(10,13,15,0.98));
 }
@@ -178,7 +172,9 @@
 .depth-bg svg {
   position: absolute;
   opacity: 0.16;
-  filter: drop-shadow(0 0 18px rgba(232,196,104,0.25));
+  /* NO filter here — filter creates a stacking context that breaks
+     position:fixed on any subsequent element in the DOM.
+     The subtle glow is not worth that side-effect. */
 }
 
 @media (max-width: 680px) {
