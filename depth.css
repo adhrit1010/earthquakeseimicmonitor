@@ -30,8 +30,7 @@
 .bento-card,
 .gauge-card,
 .metrics-card,
-.table-card,
-.agent-panel {
+.table-card {
   position: relative;
   background:
     linear-gradient(165deg, rgba(255,255,255,0.05), rgba(255,255,255,0) 40%),
