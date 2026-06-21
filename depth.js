@@ -20,10 +20,21 @@
 
 (function () {
   const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Ambient background motion is decoration, not function. On a phone,
+  // the CPU/GPU budget is already spent on the live helicorder trace and
+  // chart canvases — adding a second, purely cosmetic animation loop on
+  // top of that is the kind of thing that turns "smooth" into "laggy."
+  // Skipping it below a coarse-pointer/narrow-viewport threshold keeps
+  // the signature visual on desktop where there's budget for it, without
+  // costing anything functional on mobile.
+  const SKIP_AMBIENT_MOTION = REDUCED_MOTION
+    || window.matchMedia('(pointer: coarse)').matches
+    || window.innerWidth < 760;
 
   /* ===================== AMBIENT GOLD WIREFRAME ===================== */
 
   function buildDepthBackground() {
+    if (SKIP_AMBIENT_MOTION) return; // see SKIP_AMBIENT_MOTION above — mobile gets none of this
     if (document.querySelector('.depth-bg')) return; // don't double-inject on hot reload
     const wrap = document.createElement('div');
     wrap.className = 'depth-bg';
