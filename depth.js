@@ -93,8 +93,8 @@
     let ringInner = `<circle cx="350" cy="350" r="3" fill="#e8c468" opacity="0.7"/>`;
     const ringCount = 4;
     for (let i = 0; i < ringCount; i++) {
-      ringInner += `<circle class="wave-ring" cx="350" cy="350" r="20" fill="none" stroke="#e8c468" stroke-width="1" opacity="0"
-        style="animation: depth-ring-expand 9s ease-out infinite; animation-delay: ${(i * 9) / ringCount}s;"/>`;
+      ringInner += `<circle class="wave-ring" cx="350" cy="350" r="18" fill="none" stroke="#e8c468" stroke-width="1.4"
+        style="transform-origin: 350px 350px; animation: depth-ring-expand 9s ease-out infinite; animation-delay: ${(i * 9) / ringCount}s;"/>`;
     }
     ringSvg.innerHTML = ringInner;
 
@@ -124,10 +124,10 @@
         100% { transform: scaleX(1); }
       }
       @keyframes depth-ring-expand {
-        0%   { r: 16; opacity: 0; stroke-width: 1.4; }
-        12%  { opacity: 0.5; }
+        0%   { transform: scale(0.3); opacity: 0; }
+        12%  { opacity: 0.55; }
         70%  { opacity: 0.12; }
-        100% { r: 320; opacity: 0; stroke-width: 0.4; }
+        100% { transform: scale(17); opacity: 0; }
       }
       .depth-bg svg { position: absolute; }
     `;
