@@ -1,0 +1,197 @@
+/* ===================================================================
+   depth.css
+   Adds dimensional treatment to existing cards without changing their
+   markup: layered shadow + gradient border + glass highlight on
+   .bento-card / .gauge-card / .metrics-card / .table-card, a soft
+   neumorphic press-state on buttons/toggles, and scroll-reveal hooks.
+   Built entirely from the existing TremorLab tokens in styles.css —
+   no new colors introduced.
+   =================================================================== */
+
+:root {
+  /* Derived once here so every depth effect stays in sync with the
+     existing amber/ink palette instead of hardcoding rgba() everywhere. */
+  --depth-amber-glow: rgba(232, 196, 104, 0.18);
+  --depth-amber-edge: rgba(232, 196, 104, 0.5);
+  --depth-amber-faint: rgba(232, 196, 104, 0.08);
+  --depth-shadow-ambient: rgba(0, 0, 0, 0.55);
+  --depth-shadow-contact: rgba(0, 0, 0, 0.35);
+  --depth-highlight: rgba(255, 252, 244, 0.06);
+}
+
+/* ===================== GRADIENT-BORDER + LIFTED CARD ===================== */
+
+/* Applies to every card surface already in use: bento cards, gauge
+   cards (history page), metrics cards, table cards, agent panel. */
+.bento-card,
+.gauge-card,
+.metrics-card,
+.table-card,
+.agent-panel {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0)) padding-box,
+    var(--ink-panel) padding-box;
+  border: 1px solid transparent;
+  background-clip: padding-box, padding-box;
+  box-shadow:
+    0 1px 0 0 var(--depth-highlight) inset,
+    0 18px 36px -18px var(--depth-shadow-ambient),
+    0 4px 10px -4px var(--depth-shadow-contact);
+  transition: box-shadow 0.25s ease, transform 0.25s ease, border-color 0.25s ease;
+}
+
+/* Gradient border ring, drawn as a pseudo-element so it can carry a
+   true multi-stop gradient (border-image clips badly with radius). */
+.bento-card::after,
+.gauge-card::after,
+.metrics-card::after,
+.table-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(140deg,
+    var(--depth-amber-edge) 0%,
+    rgba(232,196,104,0.08) 35%,
+    transparent 55%,
+    rgba(232,196,104,0.12) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.55;
+  transition: opacity 0.25s ease;
+}
+
+.bento-card:hover,
+.gauge-card:hover,
+.metrics-card:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 1px 0 0 var(--depth-highlight) inset,
+    0 26px 46px -18px var(--depth-shadow-ambient),
+    0 6px 14px -4px var(--depth-shadow-contact),
+    0 0 0 1px var(--depth-amber-faint);
+}
+
+.bento-card:hover::after,
+.gauge-card:hover::after,
+.metrics-card:hover::after {
+  opacity: 0.9;
+}
+
+/* Dragging state (bento.js) should read as "lifted off the surface",
+   layered on top of the existing dragging rule in bento.css. */
+.bento-card.dragging {
+  box-shadow:
+    0 1px 0 0 var(--depth-highlight) inset,
+    0 38px 64px -20px rgba(0,0,0,0.65),
+    0 0 0 1px var(--depth-amber-edge);
+}
+
+/* ===================== GLASS PANELS ===================== */
+/* Used sparingly: only the floating agent panel and the masthead get
+   true frosted glass, since covering every card in blur would erase
+   the instrument-panel feel this design is built on. */
+
+.agent-panel {
+  background:
+    linear-gradient(180deg, rgba(20,26,30,0.82), rgba(10,13,15,0.92));
+  backdrop-filter: blur(18px) saturate(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
+  border: 1px solid rgba(232,196,104,0.16);
+}
+
+.masthead {
+  background: linear-gradient(180deg, rgba(17,22,26,0.78), rgba(10,13,15,0.92));
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* ===================== NEUMORPHIC CONTROLS ===================== */
+/* Soft dual-shadow on the elements people actually press, so pressing
+   them reads as physical, matching the instrument-panel language
+   without turning the whole UI into a soft-UI mockup. */
+
+.btn,
+.agent-fab,
+.toggle-track {
+  box-shadow:
+    2px 3px 6px rgba(0,0,0,0.5),
+    -1px -1px 3px rgba(255,255,255,0.03);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow:
+    1px 1px 3px rgba(0,0,0,0.5) inset,
+    -1px -1px 2px rgba(255,255,255,0.02) inset;
+}
+
+.btn-primary {
+  box-shadow:
+    2px 4px 10px rgba(232,196,104,0.25),
+    -1px -1px 3px rgba(255,255,255,0.08) inset;
+}
+
+.agent-fab {
+  box-shadow:
+    0 10px 24px rgba(232,196,104,0.3),
+    3px 4px 8px rgba(0,0,0,0.4),
+    -1px -1px 3px rgba(255,255,255,0.1) inset;
+}
+
+/* ===================== SCROLLYTELLING REVEAL ===================== */
+/* Applied via JS (depth.js) using IntersectionObserver: each card
+   starts in .reveal-pending and gains .reveal-in once it crosses the
+   viewport threshold. Respects reduced-motion. */
+
+.reveal-pending {
+  opacity: 0;
+  transform: translateY(22px) scale(0.985);
+}
+
+.reveal-in {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal-pending { opacity: 1; transform: none; }
+  .reveal-in { transition: none; }
+  .bento-card, .gauge-card, .metrics-card { transition: none; }
+}
+
+/* ===================== AMBIENT BACKGROUND LAYER ===================== */
+/* Sits behind .grain (z-index 1) and above plain body background.
+   Holds the moving gold 3D wireframe — see depth.js for the SVG
+   construction and animation; this just positions/contains it. */
+
+.depth-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.depth-bg svg {
+  position: absolute;
+  opacity: 0.16;
+  filter: drop-shadow(0 0 18px rgba(232,196,104,0.25));
+}
+
+@media (max-width: 680px) {
+  .depth-bg svg { opacity: 0.1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .depth-bg .spin,
+  .depth-bg .drift {
+    animation: none !important;
+  }
+}
