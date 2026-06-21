@@ -13,25 +13,35 @@
    controls keep working exactly as before.
    =================================================================== */
 
-.bento-card {
-  touch-action: none;
-  -webkit-touch-callout: none;   /* stop iOS long-press callout from firing mid-press */
-  -webkit-user-select: none;
-  user-select: none;
-}
+/* Drag-to-reorder is a fine-pointer (mouse/trackpad) feature — see the
+   comment in bento.js for the full reasoning. On a coarse pointer
+   (touch), .bento-card must NOT set touch-action: none, or the
+   browser intercepts ordinary scroll swipes as potential drags before
+   it can tell them apart, which is what caused "no room to scroll" /
+   laggy behavior on phones. Scoping with @media (pointer: fine) keeps
+   both files in agreement: bento.js skips attaching drag listeners on
+   coarse pointers, and this rule skips locking touch-action there too. */
+@media (pointer: fine) {
+  .bento-card {
+    touch-action: none;
+    -webkit-touch-callout: none;   /* stop iOS long-press callout from firing mid-press */
+    -webkit-user-select: none;
+    user-select: none;
+  }
 
-.bento-card input,
-.bento-card select,
-.bento-card button,
-.bento-card a,
-.bento-card textarea,
-.bento-card canvas,
-.bento-card table,
-.bento-card .card-body {
-  touch-action: auto;
-  -webkit-touch-callout: default;
-  -webkit-user-select: auto;
-  user-select: auto;
+  .bento-card input,
+  .bento-card select,
+  .bento-card button,
+  .bento-card a,
+  .bento-card textarea,
+  .bento-card canvas,
+  .bento-card table,
+  .bento-card .card-body {
+    touch-action: auto;
+    -webkit-touch-callout: default;
+    -webkit-user-select: auto;
+    user-select: auto;
+  }
 }
 
 /* While a card is actively being dragged, lock page scroll/bounce so
