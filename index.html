@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/analytics-widgets.css" />
   <link rel="stylesheet" href="/metrics-panel.css" />
+  <link rel="stylesheet" href="/bento.css" />
 </head>
 <body>
 
@@ -38,35 +39,13 @@
         <span class="status-dot" id="cloudDot"></span>
         <span id="cloudText">Connecting&hellip;</span>
       </div>
+      <button id="bentoResetBtn" class="bento-reset" type="button" hidden>
+        <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3.5H10"/></svg>
+        Reset layout
+      </button>
     </div>
   </div>
 </header>
-<!-- HELICORDER: the signature element. A continuously scrolling seismic trace, drum-recorder style. -->
-<section class="helicorder" aria-label="Live helicorder trace">
-  <div class="helicorder-head">
-    <div class="helicorder-label">
-      <span class="eyebrow">Live trace</span>
-      <span class="helicorder-channels">ADXL345 &middot; LIS3DH &middot; MPU6050</span>
-    </div>
-    <div class="helicorder-readout">
-      <div class="readout-block">
-        <span class="readout-val" id="liveRatio">&minus;&minus;</span>
-        <span class="readout-key">STA/LTA</span>
-      </div>
-      <div class="readout-block">
-        <span class="readout-val" id="liveClass">IDLE</span>
-        <span class="readout-key">state</span>
-      </div>
-    </div>
-  </div>
-  <div class="helicorder-canvas-wrap">
-    <canvas id="helicorderChart" aria-hidden="true"></canvas>
-    <div class="helicorder-trigger-line" id="triggerLine"></div>
-  </div>
-  <div class="helicorder-foot">
-    <span>Sweeping right to left &middot; most recent sample at the trace head</span>
-  </div>
-</section>
 
 <main>
 
@@ -108,150 +87,165 @@
     </div>
   </section>
 
-  <!-- INSTRUMENT PANEL -->
-  <section class="panel-grid" aria-label="Station summary">
-    <article class="gauge-card">
+  <!-- BENTO GRID: every dashboard section is a draggable card.
+       data-card-id values are stable keys used for saving/restoring order. -->
+  <div class="bento-grid" id="bentoGrid">
+
+    <!-- HELICORDER -->
+    <article class="bento-card span-12 row-2" data-card-id="helicorder">
+      <div class="card-title">
+        <div>
+          <span class="eyebrow">Live trace</span>
+          <h2>Helicorder &middot; ADXL345 &middot; LIS3DH &middot; MPU6050</h2>
+        </div>
+        <div class="helicorder-readout">
+          <div class="readout-block">
+            <span class="readout-val" id="liveRatio">&minus;&minus;</span>
+            <span class="readout-key">STA/LTA</span>
+          </div>
+          <div class="readout-block">
+            <span class="readout-val" id="liveClass">IDLE</span>
+            <span class="readout-key">state</span>
+          </div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="helicorder-canvas-wrap">
+          <canvas id="helicorderChart" aria-hidden="true"></canvas>
+          <div class="helicorder-trigger-line" id="triggerLine"></div>
+        </div>
+        <p class="widget-note">Sweeping right to left &middot; most recent sample at the trace head</p>
+      </div>
+    </article>
+
+    <!-- INSTRUMENT GAUGES -->
+    <article class="bento-card span-3" data-card-id="gauge-count">
       <span class="eyebrow">Events loaded</span>
       <div class="gauge-value" id="count">&mdash;</div>
       <span class="gauge-unit">total in window</span>
     </article>
-    <article class="gauge-card">
+    <article class="bento-card span-3" data-card-id="gauge-pga">
       <span class="eyebrow">Peak PGA</span>
       <div class="gauge-value" id="peakPga">&mdash;</div>
       <span class="gauge-unit">cm/s&sup2;</span>
     </article>
-    <article class="gauge-card">
+    <article class="bento-card span-3" data-card-id="gauge-mag">
       <span class="eyebrow">Max magnitude</span>
       <div class="gauge-value" id="maxMag">&mdash;</div>
       <span class="gauge-unit">estimated</span>
     </article>
-    <article class="gauge-card gauge-card--quality">
+    <article class="bento-card span-3" data-card-id="gauge-quality">
       <span class="eyebrow">Data quality</span>
       <div class="gauge-value" id="quality">&mdash;</div>
       <div class="quality-bar"><div class="quality-bar-fill" id="qualityFill"></div></div>
       <span class="gauge-unit" id="action">&mdash;</span>
     </article>
-  </section>
 
-  <!-- ADVANCED ANALYTICS: sensor correlation, confidence meter, severity gauge -->
-  <section class="analytics-grid" aria-label="Advanced seismic analytics">
-    <article class="widget-card" id="agreementCard">
+    <!-- ADVANCED ANALYTICS -->
+    <article class="bento-card span-4 row-2" data-card-id="agreement" id="agreementCard">
       <span class="eyebrow">Sensor correlation</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="widget-card" id="confidenceCard">
+    <article class="bento-card span-4 row-2" data-card-id="confidence" id="confidenceCard">
       <span class="eyebrow">Seismic confidence</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="widget-card" id="severityCard">
+    <article class="bento-card span-4 row-2" data-card-id="severity" id="severityCard">
       <span class="eyebrow">Event severity</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-  </section>
 
-  <!-- EXPANDED METRICS: seismic measurements, detection, waveform, timing, simulation, health, statistics -->
-  <section class="metrics-grid" aria-label="Expanded station metrics">
-    <article class="metrics-card" id="seismicMeasurementsCard">
+    <!-- EXPANDED METRICS -->
+    <article class="bento-card span-4" data-card-id="seismic-measurements" id="seismicMeasurementsCard">
       <span class="eyebrow">Seismic measurements</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="metrics-card" id="detectionMetricsCard">
+    <article class="bento-card span-4" data-card-id="detection-metrics" id="detectionMetricsCard">
       <span class="eyebrow">Detection metrics</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="metrics-card" id="waveformMetricsCard">
+    <article class="bento-card span-4" data-card-id="waveform-metrics" id="waveformMetricsCard">
       <span class="eyebrow">Waveform metrics</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="metrics-card" id="timingMetricsCard">
+    <article class="bento-card span-4" data-card-id="timing-metrics" id="timingMetricsCard">
       <span class="eyebrow">Timing metrics</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="metrics-card" id="simulationMetricsCard">
+    <article class="bento-card span-4" data-card-id="simulation-metrics" id="simulationMetricsCard">
       <span class="eyebrow">Simulation metrics</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="metrics-card" id="healthMetricsCard">
+    <article class="bento-card span-4" data-card-id="health-metrics" id="healthMetricsCard">
       <span class="eyebrow">Alert &amp; health metrics</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-    <article class="metrics-card" id="eventStatisticsCard">
+
+    <!-- EVENT STATISTICS -->
+    <article class="bento-card span-6" data-card-id="event-statistics" id="eventStatisticsCard">
       <span class="eyebrow">Event statistics</span>
       <p class="widget-empty">Waiting for data&hellip;</p>
     </article>
-  </section>
 
-  <!-- CHARTS -->
-  <section class="chart-grid">
-    <article class="chart-card chart-card--wide">
-      <header><h2>STA/LTA trends</h2><p>All three sensors, merged trigger ratio over time</p></header>
-      <canvas id="staltaChart"></canvas>
+    <!-- CLASSIFICATION FREQUENCY -->
+    <article class="bento-card span-6" data-card-id="class-chart">
+      <div class="card-title"><h2>Classification frequency</h2></div>
+      <div class="card-body">
+        <canvas id="classChart"></canvas>
+      </div>
     </article>
-    <article class="chart-card">
-      <header><h2>PGA vs. time</h2><p>Peak ground acceleration</p></header>
-      <canvas id="pgaChart"></canvas>
-    </article>
-    <article class="chart-card">
-      <header><h2>Magnitude vs. time</h2><p>Estimated local magnitude</p></header>
-      <canvas id="magChart"></canvas>
-    </article>
-    <article class="chart-card">
-      <header><h2>Distance vs. time</h2><p>Estimated epicentral distance</p></header>
-      <canvas id="distChart"></canvas>
-    </article>
-    <article class="chart-card">
-      <header><h2>Classification frequency</h2><p>Event types in the current window</p></header>
-      <canvas id="classChart"></canvas>
-    </article>
-  </section>
 
-  <!-- AGENT + TABLE -->
-  <section class="lower-grid">
-    <article class="agent-card">
-      <header class="agent-header">
+    <!-- STA/LTA TRENDS -->
+    <article class="bento-card span-12" data-card-id="stalta-chart">
+      <div class="card-title">
         <div>
-          <span class="eyebrow">Station analyst</span>
-          <h2>Ask the array</h2>
-        </div>
-        <span class="agent-pulse" id="agentPulse" aria-hidden="true"></span>
-      </header>
-      <div class="quick-row" id="quickRow">
-        <button data-question="Summarize the current station data">Summarize</button>
-        <button data-question="What was the strongest event?">Strongest event</button>
-        <button data-question="Is the validation error acceptable?">Validation</button>
-        <button data-question="Are the sensors agreeing?">Sensor agreement</button>
-        <button data-question="How should I tune thresholds?">Tune thresholds</button>
-      </div>
-      <div id="chatLog" class="chat-log">
-        <div class="chat-msg chat-msg--agent">
-          <span class="chat-tag">Agent</span>
-          <p>Ask me about loaded events, strongest shaking, validation error, sensor agreement, or threshold tuning.</p>
+          <span class="eyebrow">Trend</span>
+          <h2>STA/LTA trends &mdash; merged trigger ratio over time</h2>
         </div>
       </div>
-      <form class="agent-row" id="agentForm">
-        <input id="agentInput" placeholder="Ask the station agent&hellip;" autocomplete="off" />
-        <button id="askBtn" type="submit" class="btn btn-primary">Ask</button>
-      </form>
+      <div class="card-body">
+        <canvas id="staltaChart"></canvas>
+      </div>
     </article>
 
-    <article class="table-card">
-      <header>
-        <span class="eyebrow">Event log</span>
-        <h2>Recent detections</h2>
-      </header>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th><th>Class</th><th>PGA</th><th>MMI</th><th>Dist.</th><th>Mag</th>
-              <th title="ADXL345 STA/LTA">ADXL</th><th title="LIS3DH STA/LTA">LIS</th><th title="MPU6050 STA/LTA">MPU</th><th>Error</th>
-            </tr>
-          </thead>
-          <tbody id="rows"><tr><td colspan="10" class="empty-state">No data loaded yet</td></tr></tbody>
-        </table>
+    <!-- PGA / MAG / DIST CHARTS -->
+    <article class="bento-card span-4" data-card-id="pga-chart">
+      <div class="card-title"><h2>PGA vs. time</h2></div>
+      <div class="card-body"><canvas id="pgaChart"></canvas></div>
+    </article>
+    <article class="bento-card span-4" data-card-id="mag-chart">
+      <div class="card-title"><h2>Magnitude vs. time</h2></div>
+      <div class="card-body"><canvas id="magChart"></canvas></div>
+    </article>
+    <article class="bento-card span-4" data-card-id="dist-chart">
+      <div class="card-title"><h2>Distance vs. time</h2></div>
+      <div class="card-body"><canvas id="distChart"></canvas></div>
+    </article>
+
+    <!-- EVENT LOG TABLE -->
+    <article class="bento-card span-12 row-2" data-card-id="event-table">
+      <div class="card-title">
+        <div>
+          <span class="eyebrow">Event log</span>
+          <h2>Recent detections</h2>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Class</th><th>PGA</th><th>MMI</th><th>Dist.</th><th>Mag</th>
+                <th title="ADXL345 STA/LTA">ADXL</th><th title="LIS3DH STA/LTA">LIS</th><th title="MPU6050 STA/LTA">MPU</th><th>Error</th>
+              </tr>
+            </thead>
+            <tbody id="rows"><tr><td colspan="10" class="empty-state">No data loaded yet</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </article>
-  </section>
+
+  </div>
 
   <footer class="site-foot">
     <p>TremorLab station array &middot; ADXL345 + LIS3DH + MPU6050 &middot; adaptive STA/LTA &middot; live since page load</p>
@@ -259,8 +253,46 @@
 
 </main>
 
+<!-- FLOATING AGENT LAUNCHER -->
+<button id="agentFab" class="agent-fab" type="button" aria-label="Open station analyst" aria-expanded="false">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+  </svg>
+  <span class="fab-dot" id="agentPulse" aria-hidden="true"></span>
+</button>
+
+<section class="agent-panel" id="agentPanel" aria-label="Station analyst">
+  <div class="agent-panel-head">
+    <div>
+      <span class="eyebrow">Station analyst</span>
+      <h2>Ask the array</h2>
+    </div>
+    <button id="agentPanelClose" class="agent-panel-close" type="button" aria-label="Close">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="quick-row" id="quickRow">
+    <button data-question="Summarize the current station data">Summarize</button>
+    <button data-question="What was the strongest event?">Strongest event</button>
+    <button data-question="Is the validation error acceptable?">Validation</button>
+    <button data-question="Are the sensors agreeing?">Sensor agreement</button>
+    <button data-question="How should I tune thresholds?">Tune thresholds</button>
+  </div>
+  <div id="chatLog" class="chat-log">
+    <div class="chat-msg chat-msg--agent">
+      <span class="chat-tag">Agent</span>
+      <p>Ask me about loaded events, strongest shaking, validation error, sensor agreement, or threshold tuning.</p>
+    </div>
+  </div>
+  <form class="agent-row" id="agentForm">
+    <input id="agentInput" placeholder="Ask the station agent&hellip;" autocomplete="off" />
+    <button id="askBtn" type="submit" class="btn btn-primary">Ask</button>
+  </form>
+</section>
+
 <script src="/analytics-widgets.js"></script>
 <script src="/metrics-panel.js"></script>
 <script src="/app.js"></script>
+<script src="/bento.js"></script>
 </body>
 </html>
