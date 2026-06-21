@@ -17,7 +17,7 @@
 .bento-card {
   background: var(--ink-panel);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 20px;
   padding: 20px 22px;
   position: relative;
   overflow: hidden;
@@ -207,7 +207,7 @@ main { padding-top: 26px; }
   justify-content: center;
   cursor: pointer;
   z-index: 201;
-  box-shadow: 0 6px 22px rgba(232, 196, 104, 0.35), 0 0 0 0 rgba(232, 196, 104, 0.5);
+  box-shadow: 0 6px 22px rgba(255, 207, 64, 0.4), 0 0 0 0 rgba(255, 207, 64, 0.55);
   animation: fab-pulse 2.6s ease-in-out infinite;
   transition: transform 0.15s ease;
 }
@@ -233,8 +233,8 @@ main { padding-top: 26px; }
 }
 
 @keyframes fab-pulse {
-  0%, 100% { box-shadow: 0 6px 22px rgba(232, 196, 104, 0.35), 0 0 0 0 rgba(232, 196, 104, 0.35); }
-  50%      { box-shadow: 0 6px 22px rgba(232, 196, 104, 0.35), 0 0 0 10px rgba(232, 196, 104, 0); }
+  0%, 100% { box-shadow: 0 6px 22px rgba(255, 207, 64, 0.4), 0 0 0 0 rgba(255, 207, 64, 0.4); }
+  50%      { box-shadow: 0 6px 22px rgba(255, 207, 64, 0.4), 0 0 0 10px rgba(255, 207, 64, 0); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -252,7 +252,7 @@ main { padding-top: 26px; }
   max-height: min(640px, calc(100vh - 130px));
   background: var(--ink-panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 18px;
   box-shadow: 0 18px 50px rgba(0,0,0,0.55);
   display: flex;
   flex-direction: column;
