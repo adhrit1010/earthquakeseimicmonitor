@@ -6,11 +6,18 @@
    neumorphic press-state on buttons/toggles, and scroll-reveal hooks.
    Built entirely from the existing TremorLab tokens in styles.css —
    no new colors introduced.
+
+   FIX (v2): Removed backdrop-filter from .masthead. backdrop-filter
+   promotes an element to its own compositing layer in Chromium, which
+   can break position:fixed on later siblings — causing the agent FAB
+   and panel to appear at the left edge of the screen instead of the
+   bottom-right corner. The masthead already has a solid background
+   gradient, so removing the blur has no visible effect.
+   backdrop-filter is kept only on .agent-panel where it is needed for
+   the frosted-glass look on an explicitly non-fixed-sibling element.
    =================================================================== */
 
 :root {
-  /* Derived once here so every depth effect stays in sync with the
-     existing amber/ink palette instead of hardcoding rgba() everywhere. */
   --depth-amber-glow: rgba(232, 196, 104, 0.18);
   --depth-amber-edge: rgba(232, 196, 104, 0.5);
   --depth-amber-faint: rgba(232, 196, 104, 0.08);
@@ -21,8 +28,6 @@
 
 /* ===================== GRADIENT-BORDER + LIFTED CARD ===================== */
 
-/* Applies to every card surface already in use: bento cards, gauge
-   cards (history page), metrics cards, table cards, agent panel. */
 .bento-card,
 .gauge-card,
 .metrics-card,
@@ -41,8 +46,6 @@
   transition: box-shadow 0.25s ease, transform 0.25s ease, border-color 0.25s ease;
 }
 
-/* Gradient border ring, drawn as a pseudo-element so it can carry a
-   true multi-stop gradient (border-image clips badly with radius). */
 .bento-card::after,
 .gauge-card::after,
 .metrics-card::after,
@@ -82,8 +85,6 @@
   opacity: 0.9;
 }
 
-/* Dragging state (bento.js) should read as "lifted off the surface",
-   layered on top of the existing dragging rule in bento.css. */
 .bento-card.dragging {
   box-shadow:
     0 1px 0 0 var(--depth-highlight) inset,
@@ -92,10 +93,15 @@
 }
 
 /* ===================== GLASS PANELS ===================== */
-/* Used sparingly: only the floating agent panel and the masthead get
-   true frosted glass, since covering every card in blur would erase
-   the instrument-panel feel this design is built on. */
 
+/*
+  IMPORTANT: backdrop-filter is applied ONLY to .agent-panel here.
+  It was previously also on .masthead, which caused position:fixed to
+  break on the FAB and panel in Chromium — the browser treats any
+  backdrop-filter element as a compositing root, which can affect how
+  fixed siblings are positioned. The masthead uses a solid gradient
+  background so it looks identical without the blur.
+*/
 .agent-panel {
   background:
     linear-gradient(180deg, rgba(20,26,30,0.82), rgba(10,13,15,0.92));
@@ -104,16 +110,12 @@
   border: 1px solid rgba(232,196,104,0.16);
 }
 
+/* .masthead gets its look from styles.css gradient — no backdrop-filter needed */
 .masthead {
-  background: linear-gradient(180deg, rgba(17,22,26,0.78), rgba(10,13,15,0.92));
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: linear-gradient(180deg, rgba(17,22,26,0.95), rgba(10,13,15,0.98));
 }
 
 /* ===================== NEUMORPHIC CONTROLS ===================== */
-/* Soft dual-shadow on the elements people actually press, so pressing
-   them reads as physical, matching the instrument-panel language
-   without turning the whole UI into a soft-UI mockup. */
 
 .btn,
 .agent-fab,
@@ -144,9 +146,6 @@
 }
 
 /* ===================== SCROLLYTELLING REVEAL ===================== */
-/* Applied via JS (depth.js) using IntersectionObserver: each card
-   starts in .reveal-pending and gains .reveal-in once it crosses the
-   viewport threshold. Respects reduced-motion. */
 
 .reveal-pending {
   opacity: 0;
@@ -167,9 +166,6 @@
 }
 
 /* ===================== AMBIENT BACKGROUND LAYER ===================== */
-/* Sits behind .grain (z-index 1) and above plain body background.
-   Holds the moving gold 3D wireframe — see depth.js for the SVG
-   construction and animation; this just positions/contains it. */
 
 .depth-bg {
   position: fixed;
