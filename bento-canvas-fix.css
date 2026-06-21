@@ -1,0 +1,51 @@
+/* ===================================================================
+   bento-canvas-fix.css
+   Fixes charts rendering as a tiny 300x150 block in the corner of an
+   oversized, mostly-empty card ("white screen" / "too long" cards).
+
+   Root cause: styles.css sizes canvases via `.chart-card canvas`, but
+   the bento grid markup never uses .chart-card — it wraps canvases in
+   `.bento-card > .card-body > canvas`. With no height rule reaching
+   that selector, every canvas falls back to the browser's intrinsic
+   default size (300x150), so app.js draws a tiny chart while the
+   surrounding card (sized by its grid row-span) stretches far beyond
+   it, leaving a large blank strip of --ink-panel that can look washed
+   out/blank depending on monitor and zoom.
+
+   Fix: give every canvas inside a bento card body an explicit height
+   and full width, matching what .chart-card canvas already does
+   elsewhere, so app.js's getBoundingClientRect() reads the real
+   on-screen size instead of the 300x150 default.
+   =================================================================== */
+
+.bento-card .card-body canvas {
+  width: 100%;
+  height: 220px;
+  display: block;
+}
+
+/* The helicorder strip and STA/LTA trend row are wide, full-bleed
+   cards (span-12) — give them a bit more vertical room so the trace
+   doesn't look squashed relative to its width. */
+[data-card-id="helicorder"] .card-body canvas,
+[data-card-id="stalta-chart"] .card-body canvas {
+  height: 240px;
+}
+
+/* PGA / Magnitude / Distance mini-charts sit three-up (span-4) and
+   read better a bit shorter, matching their narrower width. */
+[data-card-id="pga-chart"] .card-body canvas,
+[data-card-id="mag-chart"] .card-body canvas,
+[data-card-id="dist-chart"] .card-body canvas {
+  height: 180px;
+}
+
+@media (max-width: 680px) {
+  .bento-card .card-body canvas {
+    height: 180px;
+  }
+  [data-card-id="helicorder"] .card-body canvas,
+  [data-card-id="stalta-chart"] .card-body canvas {
+    height: 200px;
+  }
+}
