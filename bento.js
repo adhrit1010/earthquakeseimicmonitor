@@ -1,61 +1,60 @@
 /* ---------------------------------------------------------------------
-   bento.js (v3 — mobile drag fix)
-   Pointer-based drag-and-drop: press anywhere on a card's empty space
-   and drag to reorder. A press that doesn't move past a small threshold
-   is treated as a normal click, so buttons/inputs/canvas/table inside
-   the card keep working. Order persists in localStorage.
+   bento.js (v4 — fixed-position FAB/panel + scroll-jump fix)
 
-   v3 changes (mobile/touch):
-   - .bento-card gets touch-action: none so the browser doesn't start a
-     native page-scroll/zoom gesture on touch before our drag logic runs.
-     This is the root cause of "drag doesn't work on phone" — without it,
-     a touch-and-drag is consumed by the browser as scrolling.
-   - pointermove/pointerdown call preventDefault() once a drag actually
-     starts, so iOS/Android don't also fire scroll, text-selection
-     callouts, or pull-to-refresh mid-drag.
-   - Drag threshold is larger on touch pointers (coarse pointer) than
-     mouse, since fingers are imprecise and a 6px threshold fires
-     false-positive drags from normal taps on small screens.
-   - pointercancel is handled (mobile fires this on interruptions like
-     an incoming notification) so a card can't get stuck mid-drag.
-   - touch-callout / user-select are suppressed on cards during press so
-     long-press doesn't pop a native menu before the drag takes over.
+   v4 changes:
+   - initAgentLauncher: focus() now uses { preventScroll: true } so
+     opening the panel on desktop doesn't jump the page to the input.
+   - The FAB and panel are moved to a dedicated .agent-portal div that
+     is a direct child of <body> via JS (portal pattern). This ensures
+     no ancestor has a transform/filter/backdrop-filter that would
+     break position:fixed and cause the panel to appear in the wrong
+     place (e.g. left side of screen instead of bottom-right).
+     If the portal div already exists in HTML it is reused; otherwise
+     it is created and appended to <body>.
 --------------------------------------------------------------------- */
 
 (function () {
   const STORAGE_KEY = 'tremorlab.bentoOrder.v1';
-  const DRAG_THRESHOLD_MOUSE = 6;   // px of movement before a press becomes a drag
-  const DRAG_THRESHOLD_TOUCH = 10;  // touch needs a bit more slack than a mouse
+  const DRAG_THRESHOLD_MOUSE = 6;
+  const DRAG_THRESHOLD_TOUCH = 10;
 
-  // Elements that should never start a card-drag when pressed
   const INTERACTIVE_SELECTOR = 'input, select, button, a, textarea, canvas, table, .card-body';
 
-  // Drag-to-reorder is a desktop power-user feature: a mouse can hover,
-  // pick up, and drop a card without ever competing with scrolling.
-  // On a touch-primary device, the exact same gesture vocabulary (press
-  // and move) is also how the user scrolls the page, and a phone screen
-  // is mostly covered by card surfaces — so enabling drag there means
-  // most ordinary scroll attempts begin life as a possible drag, and the
-  // browser can't treat the touch as a scroll until *after* our drag
-  // threshold has resolved. That's the actual cause of "laggy, no room
-  // to scroll" on phones. Drag-to-reorder also is not really useful on
-  // mobile, since dragging a full-width stacked card past other
-  // full-width stacked cards is awkward at any size.
-  //
-  // (prefers-reduced-motion users are not assumed to be on touch, so
-  // motion preference is left untouched here — this checks input type.)
   const IS_TOUCH_PRIMARY = window.matchMedia('(pointer: coarse)').matches;
+
+  /* ===================== PORTAL: move FAB + panel to body =====================
+     position:fixed is supposed to be relative to the viewport, but any
+     ancestor with transform, filter, or backdrop-filter creates a new
+     containing block that breaks this — the fixed element then positions
+     relative to that ancestor instead of the viewport.
+
+     The safest fix is the "portal" pattern: physically move the FAB and
+     panel to a direct child of <body> so no transformed ancestor exists
+     above them in the DOM. We do this in JS so the HTML can keep the
+     elements wherever the author placed them for readability.
+  --------------------------------------------------------------------- */
+
+  function ensurePortal() {
+    let portal = document.getElementById('agentPortal');
+    if (!portal) {
+      portal = document.createElement('div');
+      portal.id = 'agentPortal';
+      portal.className = 'agent-portal';
+      document.body.appendChild(portal);
+    }
+
+    const fab = document.getElementById('agentFab');
+    const panel = document.getElementById('agentPanel');
+
+    if (fab && fab.parentElement !== portal) portal.appendChild(fab);
+    if (panel && panel.parentElement !== portal) portal.appendChild(panel);
+  }
 
   function initBentoGrid() {
     const grid = document.getElementById('bentoGrid');
     if (!grid) return;
 
     if (IS_TOUCH_PRIMARY) {
-      // Skip attaching any drag listeners and skip the CSS lock entirely
-      // — cards behave like plain static content, and native scrolling
-      // is never intercepted. Order restore/reset still apply, in case
-      // someone set a custom order on desktop and later opens the same
-      // browser profile on a tablet that's still coarse-pointer.
       restoreOrder(grid);
       addResetControl(grid);
       return;
@@ -77,10 +76,10 @@
     }
 
     function onPointerDown(e) {
-      if (e.button !== undefined && e.button !== 0) return; // left click / touch only
+      if (e.button !== undefined && e.button !== 0) return;
       const card = cardFromEvent(e);
       if (!card) return;
-      if (isInteractive(e)) return; // let the real control handle it
+      if (isInteractive(e)) return;
 
       dragCard = card;
       startX = e.clientX;
@@ -89,7 +88,6 @@
       pointerId = e.pointerId;
       isTouch = e.pointerType === 'touch' || e.pointerType === 'pen';
 
-      // Don't start native text selection while we decide if this is a drag
       document.addEventListener('pointermove', onPointerMove, { passive: false });
       document.addEventListener('pointerup', onPointerUp);
       document.addEventListener('pointercancel', onPointerCancel);
@@ -110,8 +108,6 @@
       dragCard.style.width = placeholder.getBoundingClientRect().width + 'px';
       moveCardTo(e.clientX, e.clientY);
       document.body.style.cursor = 'grabbing';
-      // Stop the page itself from scrolling/bouncing once a drag is live,
-      // on top of the touch-action CSS rule (belt-and-suspenders for iOS).
       document.body.style.overscrollBehavior = 'contain';
       document.body.style.touchAction = 'none';
     }
@@ -137,13 +133,10 @@
         }
       }
 
-      // Once dragging, prevent the default touch behavior (scroll,
-      // pull-to-refresh, text selection) so the gesture stays a drag.
       if (e.cancelable) e.preventDefault();
 
       moveCardTo(e.clientX, e.clientY);
 
-      // Find what card we're hovering over and reposition the placeholder
       dragCard.style.pointerEvents = 'none';
       const under = document.elementFromPoint(e.clientX, e.clientY);
       dragCard.style.pointerEvents = '';
@@ -183,7 +176,7 @@
           placeholder.replaceWith(dragCard);
         }
         saveOrder(grid);
-        window.dispatchEvent(new Event('resize')); // let canvases redraw at new size
+        window.dispatchEvent(new Event('resize'));
       }
 
       placeholder = null;
@@ -193,16 +186,8 @@
       isTouch = false;
     }
 
-    function onPointerUp() {
-      endDragCleanup();
-    }
-
-    // Mobile fires pointercancel on interruptions (incoming call, browser
-    // chrome gesture taking over, etc.) — without this handler the card
-    // would stay stuck in "dragging" state with no way to drop it.
-    function onPointerCancel() {
-      endDragCleanup();
-    }
+    function onPointerUp() { endDragCleanup(); }
+    function onPointerCancel() { endDragCleanup(); }
 
     grid.addEventListener('pointerdown', onPointerDown);
 
@@ -217,7 +202,7 @@
       .filter(Boolean);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(order));
-    } catch (err) { /* storage unavailable, ignore */ }
+    } catch (err) {}
     const resetBtn = document.getElementById('bentoResetBtn');
     if (resetBtn) resetBtn.hidden = false;
   }
@@ -253,11 +238,12 @@
     });
   }
 
-  /* ---------------------------------------------------------------------
-     Floating agent launcher
-  --------------------------------------------------------------------- */
+  /* ===================== FLOATING AGENT LAUNCHER ===================== */
 
   function initAgentLauncher() {
+    // Portal must be set up before we query the moved elements
+    ensurePortal();
+
     const fab = document.getElementById('agentFab');
     const panel = document.getElementById('agentPanel');
     const closeBtn = document.getElementById('agentPanelClose');
@@ -267,7 +253,13 @@
       panel.classList.add('open');
       fab.setAttribute('aria-expanded', 'true');
       const input = document.getElementById('agentInput');
-      if (input) setTimeout(() => input.focus(), 180);
+      if (input) {
+        setTimeout(() => {
+          // FIX: preventScroll stops the browser jumping the page
+          // to the input element when the panel opens on desktop.
+          input.focus({ preventScroll: true });
+        }, 180);
+      }
     }
     function close() {
       panel.classList.remove('open');
