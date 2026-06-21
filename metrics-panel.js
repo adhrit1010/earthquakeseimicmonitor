@@ -21,10 +21,20 @@
 --------------------------------------------------------------------- */
 
 const NOT_WIRED = '<span class="not-wired">Not wired yet</span>';
+const NOT_DETECTED = '<span class="not-wired">Not detected</span>';
 
 function metricRow(label, value, unit) {
   const valueHtml = (value === null || value === undefined)
     ? NOT_WIRED
+    : `${value}${unit ? ` <span class="metric-unit">${unit}</span>` : ''}`;
+  return `<li><span class="metric-label">${label}</span><span class="metric-value">${valueHtml}</span></li>`;
+}
+
+// Like metricRow but uses NOT_DETECTED instead of NOT_WIRED for absent values.
+// Use this for fields that ARE wired but simply weren't triggered this event.
+function detectedRow(label, value, unit) {
+  const valueHtml = (value === null || value === undefined)
+    ? NOT_DETECTED
     : `${value}${unit ? ` <span class="metric-unit">${unit}</span>` : ''}`;
   return `<li><span class="metric-label">${label}</span><span class="metric-value">${valueHtml}</span></li>`;
 }
@@ -97,65 +107,142 @@ function renderDetectionMetrics(summary, rows) {
 
 /* ---------------------------------------------------------------------
    Waveform Metrics
-   Now wired to summary.waveform, which server.py's fetch_waveform()
-   populates from station_waveform for the strongest event:
-     adxl345Samples, lis3dhSamples, mpu6050Samples, unifiedSamples,
-     pWaveIndex, sWaveIndex, surfaceWaveIndex,
-     peakAmplitude, waveformConfidence, sampleRateHz
+   Wired to summary.waveform, populated by server.py's fetch_waveform()
+   from station_waveform for the strongest earthquake_history event.
 
-   Sample arrays themselves aren't itemized as metric rows (they're
-   raw signal data, not a single value) -- this renders the markers
-   derived from them plus a presence indicator for each channel's
-   array, so the card honestly reflects what's actually in Supabase.
+   States handled:
+     1. summary.waveform is null + source is station_live
+        → ESP32 doesn't write waveforms for live rows; explain this.
+     2. summary.waveform is null + source is earthquake_history (or unknown)
+        → waveform row doesn't exist yet for this event_id.
+     3. summary.waveform exists but hasUsableData is false
+        → row exists but all columns are null/empty (schema applied but
+          ESP32 not yet sending raw samples).
+     4. summary.waveform exists and hasUsableData is true
+        → render everything we have; use NOT_DETECTED (not NOT_WIRED)
+          for individual fields that are null — they're wired, just absent.
+
+   Division-by-zero guard: sampleRateHz is null (not 0) when unknown,
+   so indexToSeconds returns null rather than Infinity.
 --------------------------------------------------------------------- */
 
 function renderWaveformMetrics(summary) {
   const card = document.getElementById('waveformMetricsCard');
   if (!card) return;
-  const wf = summary && summary.waveform;
 
-  if (!wf) {
+  const wf = summary && summary.waveform;
+  const strongest = summary && summary.strongest;
+  const strongestSource = strongest && strongest.source;
+
+  // ── State 1: live-station row — waveform lookup not applicable ──
+  if (!wf && strongestSource === 'station_live') {
     card.innerHTML = `
       <span class="eyebrow">Waveform metrics</span>
-      <p class="widget-empty">No station_waveform row for this event yet &mdash; point the ESP32's raw adxl345/lis3dh/mpu6050 sample writes at this event_id to populate it.</p>
+      <p class="widget-empty">
+        Waveform data is only stored for confirmed earthquake_history events.
+        The current strongest row is from station_live (no persistent event_id).
+        Once the ESP32 logs a confirmed event to earthquake_history and writes
+        raw samples to station_waveform with a matching event_id, this card
+        will populate automatically.
+      </p>
     `;
     return;
   }
 
-  const channelStatus = (samples) =>
-    Array.isArray(samples) && samples.length ? `${samples.length} samples` : null;
+  // ── State 2: history row but no waveform row in Supabase yet ──
+  if (!wf) {
+    const eventId = strongest && strongest.event_id ? strongest.event_id : null;
+    card.innerHTML = `
+      <span class="eyebrow">Waveform metrics</span>
+      <p class="widget-empty">
+        No station_waveform row found${eventId ? ` for event&nbsp;<code>${eventId}</code>` : ''}.
+        Have the ESP32 INSERT a row into station_waveform with
+        <code>event_id = '${eventId || '&lt;event_id&gt;'}'</code>
+        and the raw adxl345_samples / lis3dh_samples / mpu6050_samples arrays
+        to populate this card.
+      </p>
+    `;
+    return;
+  }
 
-  const sampleRate = Number(wf.sampleRateHz) > 0 ? Number(wf.sampleRateHz).toFixed(0) : null;
+  // ── State 3: row exists but no usable data columns filled in yet ──
+  if (!wf.hasUsableData) {
+    card.innerHTML = `
+      <span class="eyebrow">Waveform metrics</span>
+      <p class="widget-empty">
+        A station_waveform row exists for this event but all sample arrays and
+        wave-marker columns are empty. The schema is applied — update the ESP32
+        firmware to write adxl345_samples, lis3dh_samples, mpu6050_samples (as
+        JSON arrays), p_wave_index, s_wave_index, and sample_rate_hz to fill
+        this card.
+      </p>
+    `;
+    return;
+  }
 
-  const indexToSeconds = (idx) => {
-    if (idx === null || idx === undefined || idx < 0 || !sampleRate) return null;
-    return (idx / Number(wf.sampleRateHz)).toFixed(2);
-  };
+  // ── State 4: real data present — render it ──
 
-  const pMarker = indexToSeconds(wf.pWaveIndex);
-  const sMarker = indexToSeconds(wf.sWaveIndex);
-  const surfaceMarker = indexToSeconds(wf.surfaceWaveIndex);
-  const gap = (pMarker !== null && sMarker !== null)
-    ? (Number(sMarker) - Number(pMarker)).toFixed(2)
-    : null;
+  const sampleRateHz = wf.sampleRateHz; // null if unknown/zero, never 0
 
-  const peakAmp = Number(wf.peakAmplitude) >= 0 ? Number(wf.peakAmplitude).toFixed(2) : null;
-  const wfConfidence = Number(wf.waveformConfidence) >= 0 ? Number(wf.waveformConfidence).toFixed(0) : null;
+  // Convert a sample index to seconds. Returns null (→ NOT_DETECTED) if:
+  //   - index is null (wave not detected this event)
+  //   - sampleRateHz is null/zero (rate not recorded)
+  function indexToSeconds(idx) {
+    if (idx === null || idx === undefined) return null;
+    if (!sampleRateHz || sampleRateHz <= 0) return null;
+    const secs = idx / sampleRateHz;
+    // Extra sanity guard: Infinity or NaN means something went wrong
+    if (!isFinite(secs)) return null;
+    return secs.toFixed(2);
+  }
+
+  function channelStatus(samples) {
+    if (Array.isArray(samples) && samples.length > 0) {
+      return `${samples.length}\u202fsamples`;
+    }
+    return null; // renders as NOT_DETECTED (channel wired but empty this event)
+  }
+
+  const sampleRateDisplay = sampleRateHz ? Number(sampleRateHz).toFixed(0) : null;
+
+  const pSec = indexToSeconds(wf.pWaveIndex);
+  const sSec = indexToSeconds(wf.sWaveIndex);
+  const surfaceSec = indexToSeconds(wf.surfaceWaveIndex);
+
+  // P–S gap: only meaningful when both are present AND sample rate is known
+  let gap = null;
+  if (pSec !== null && sSec !== null) {
+    const gapVal = Number(sSec) - Number(pSec);
+    gap = isFinite(gapVal) ? gapVal.toFixed(2) : null;
+  }
+
+  const peakAmp = wf.peakAmplitude !== null && wf.peakAmplitude !== undefined && wf.peakAmplitude >= 0
+    ? Number(wf.peakAmplitude).toFixed(2) : null;
+  const wfConf = wf.waveformConfidence !== null && wf.waveformConfidence !== undefined && wf.waveformConfidence >= 0
+    ? Number(wf.waveformConfidence).toFixed(0) : null;
+
+  // If sampleRate is missing we can still show markers as raw indices
+  function indexDisplay(idx) {
+    if (idx === null || idx === undefined) return null;
+    if (!sampleRateHz) return `sample\u202f#${idx}`;
+    return indexToSeconds(idx); // already a string or null
+  }
+  const indexUnit = sampleRateHz ? 's' : null;
 
   card.innerHTML = `
     <span class="eyebrow">Waveform metrics</span>
     <ul class="metric-list">
-      ${metricRow('Sample rate', sampleRate, 'Hz')}
-      ${metricRow('ADXL345 waveform', channelStatus(wf.adxl345Samples), null)}
-      ${metricRow('LIS3DH waveform', channelStatus(wf.lis3dhSamples), null)}
-      ${metricRow('MPU6050 waveform', channelStatus(wf.mpu6050Samples), null)}
-      ${metricRow('Unified seismic waveform', channelStatus(wf.unifiedSamples), null)}
-      ${metricRow('P-wave marker', pMarker, 's')}
-      ${metricRow('S-wave marker', sMarker, 's')}
-      ${metricRow('Surface wave marker', surfaceMarker, 's')}
-      ${metricRow('Peak amplitude', peakAmp, null)}
-      ${metricRow('P&ndash;S gap', gap, 's')}
-      ${metricRow('Waveform confidence', wfConfidence, '%')}
+      ${metricRow('Sample rate', sampleRateDisplay, 'Hz')}
+      ${detectedRow('ADXL345 waveform', channelStatus(wf.adxl345Samples), null)}
+      ${detectedRow('LIS3DH waveform', channelStatus(wf.lis3dhSamples), null)}
+      ${detectedRow('MPU6050 waveform', channelStatus(wf.mpu6050Samples), null)}
+      ${detectedRow('Unified seismic waveform', channelStatus(wf.unifiedSamples), null)}
+      ${detectedRow('P-wave marker', indexDisplay(wf.pWaveIndex), indexUnit)}
+      ${detectedRow('S-wave marker', indexDisplay(wf.sWaveIndex), indexUnit)}
+      ${detectedRow('Surface wave marker', indexDisplay(wf.surfaceWaveIndex), indexUnit)}
+      ${detectedRow('Peak amplitude', peakAmp, null)}
+      ${detectedRow('P&ndash;S gap', gap, sampleRateHz ? 's' : null)}
+      ${detectedRow('Waveform confidence', wfConf, '%')}
     </ul>
   `;
 }
