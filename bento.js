@@ -1,16 +1,16 @@
 /* ---------------------------------------------------------------------
-   bento.js (v4 — fixed-position FAB/panel + scroll-jump fix)
+   bento.js (v5 — scroll-jump fix only; portal removed)
 
-   v4 changes:
-   - initAgentLauncher: focus() now uses { preventScroll: true } so
-     opening the panel on desktop doesn't jump the page to the input.
-   - The FAB and panel are moved to a dedicated .agent-portal div that
-     is a direct child of <body> via JS (portal pattern). This ensures
-     no ancestor has a transform/filter/backdrop-filter that would
-     break position:fixed and cause the panel to appear in the wrong
-     place (e.g. left side of screen instead of bottom-right).
-     If the portal div already exists in HTML it is reused; otherwise
-     it is created and appended to <body>.
+   The FAB and panel are direct children of <body> in index.html, so
+   position:fixed works correctly without a portal wrapper. The portal
+   approach in v4 introduced a new containing block that caused the
+   panel to left-anchor instead of right-anchor.
+
+   v5 changes vs original:
+   - focus() uses { preventScroll: true } so opening the panel on
+     desktop doesn't jump the page to the input element.
+   - Portal logic removed entirely; DOM structure unchanged.
+   - All other drag/reorder/mobile logic identical to v3.
 --------------------------------------------------------------------- */
 
 (function () {
@@ -21,34 +21,6 @@
   const INTERACTIVE_SELECTOR = 'input, select, button, a, textarea, canvas, table, .card-body';
 
   const IS_TOUCH_PRIMARY = window.matchMedia('(pointer: coarse)').matches;
-
-  /* ===================== PORTAL: move FAB + panel to body =====================
-     position:fixed is supposed to be relative to the viewport, but any
-     ancestor with transform, filter, or backdrop-filter creates a new
-     containing block that breaks this — the fixed element then positions
-     relative to that ancestor instead of the viewport.
-
-     The safest fix is the "portal" pattern: physically move the FAB and
-     panel to a direct child of <body> so no transformed ancestor exists
-     above them in the DOM. We do this in JS so the HTML can keep the
-     elements wherever the author placed them for readability.
-  --------------------------------------------------------------------- */
-
-  function ensurePortal() {
-    let portal = document.getElementById('agentPortal');
-    if (!portal) {
-      portal = document.createElement('div');
-      portal.id = 'agentPortal';
-      portal.className = 'agent-portal';
-      document.body.appendChild(portal);
-    }
-
-    const fab = document.getElementById('agentFab');
-    const panel = document.getElementById('agentPanel');
-
-    if (fab && fab.parentElement !== portal) portal.appendChild(fab);
-    if (panel && panel.parentElement !== portal) portal.appendChild(panel);
-  }
 
   function initBentoGrid() {
     const grid = document.getElementById('bentoGrid');
@@ -134,7 +106,6 @@
       }
 
       if (e.cancelable) e.preventDefault();
-
       moveCardTo(e.clientX, e.clientY);
 
       dragCard.style.pointerEvents = 'none';
@@ -147,11 +118,8 @@
         targetCard.classList.add('drop-target');
         const rect = targetCard.getBoundingClientRect();
         const before = e.clientX < rect.left + rect.width / 2;
-        if (before) {
-          targetCard.before(placeholder);
-        } else {
-          targetCard.after(placeholder);
-        }
+        if (before) targetCard.before(placeholder);
+        else targetCard.after(placeholder);
       }
     }
 
@@ -190,7 +158,6 @@
     function onPointerCancel() { endDragCleanup(); }
 
     grid.addEventListener('pointerdown', onPointerDown);
-
     restoreOrder(grid);
     addResetControl(grid);
   }
@@ -200,20 +167,14 @@
       .filter(el => el.classList.contains('bento-card'))
       .map(el => el.dataset.cardId)
       .filter(Boolean);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(order));
-    } catch (err) {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(order)); } catch (err) {}
     const resetBtn = document.getElementById('bentoResetBtn');
     if (resetBtn) resetBtn.hidden = false;
   }
 
   function restoreOrder(grid) {
     let order;
-    try {
-      order = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
-    } catch (err) {
-      order = null;
-    }
+    try { order = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (err) { order = null; }
     if (!Array.isArray(order) || !order.length) return;
 
     const byId = new Map(
@@ -241,9 +202,6 @@
   /* ===================== FLOATING AGENT LAUNCHER ===================== */
 
   function initAgentLauncher() {
-    // Portal must be set up before we query the moved elements
-    ensurePortal();
-
     const fab = document.getElementById('agentFab');
     const panel = document.getElementById('agentPanel');
     const closeBtn = document.getElementById('agentPanelClose');
@@ -255,8 +213,8 @@
       const input = document.getElementById('agentInput');
       if (input) {
         setTimeout(() => {
-          // FIX: preventScroll stops the browser jumping the page
-          // to the input element when the panel opens on desktop.
+          // preventScroll: true stops the browser from jumping the
+          // page to the input element when the panel opens on desktop.
           input.focus({ preventScroll: true });
         }, 180);
       }
