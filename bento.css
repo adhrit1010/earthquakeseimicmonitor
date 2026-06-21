@@ -1,6 +1,6 @@
 /* ===================================================================
    bento.css — Draggable bento grid layout + floating agent launcher
-   Built on top of styles.css tokens (ink/amber/bone palette unchanged)
+   v2: whole-card dragging, more breathing room, lighter density
    =================================================================== */
 
 /* ===================== BENTO GRID CONTAINER ===================== */
@@ -8,23 +8,26 @@
 .bento-grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  grid-auto-rows: minmax(64px, auto);
-  gap: 12px;
-  margin-bottom: 18px;
+  grid-auto-rows: minmax(76px, auto);
+  gap: 18px;
+  margin-bottom: 26px;
   position: relative;
 }
 
 .bento-card {
   background: var(--ink-panel);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 16px;
+  border-radius: 6px;
+  padding: 20px 22px;
   position: relative;
   overflow: hidden;
   display: flex;
   flex-direction: column;
   min-width: 0;
-  transition: box-shadow 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: box-shadow 0.18s ease, border-color 0.18s ease, opacity 0.15s ease;
 }
 
 .bento-card::before {
@@ -33,7 +36,7 @@
   top: 0; left: 0; right: 0;
   height: 2px;
   background: linear-gradient(90deg, var(--amber), transparent);
-  opacity: 0.55;
+  opacity: 0.35;
   pointer-events: none;
 }
 
@@ -41,45 +44,40 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  cursor: default;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-/* Drag handle — small grip in the corner, not the whole card,
-   so buttons/inputs/canvas inside remain fully interactive */
-.bento-handle {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 22px;
-  height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  color: var(--bone-faint);
+/* Interactive elements inside a card stay normal cursor + selectable,
+   and a press on them does not start a drag (handled in JS). */
+.bento-card input,
+.bento-card select,
+.bento-card button,
+.bento-card table,
+.bento-card canvas,
+.bento-card a {
+  cursor: auto;
+  user-select: auto;
+  -webkit-user-select: auto;
+}
+
+.bento-card .card-title {
   cursor: grab;
-  opacity: 0.45;
-  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
-  z-index: 5;
-  touch-action: none;
 }
-
-.bento-handle:hover {
-  opacity: 1;
-  color: var(--amber);
-  background: rgba(232, 196, 104, 0.08);
-}
-
-.bento-handle:active { cursor: grabbing; }
-
-.bento-handle svg { width: 14px; height: 14px; }
 
 /* Dragging state */
 .bento-card.dragging {
-  opacity: 0.55;
+  opacity: 0.5;
   border-color: var(--amber-dim);
-  box-shadow: 0 8px 28px rgba(0,0,0,0.5);
+  box-shadow: 0 10px 32px rgba(0,0,0,0.5);
   z-index: 20;
   cursor: grabbing;
+}
+
+.bento-card.dragging,
+.bento-card.dragging * {
+  cursor: grabbing !important;
 }
 
 .bento-card.drop-target {
@@ -87,7 +85,7 @@
   box-shadow: 0 0 0 1px var(--amber) inset;
 }
 
-/* Span utility classes — assigned per-card based on natural content size */
+/* Span utility classes */
 .span-3  { grid-column: span 3; }
 .span-4  { grid-column: span 4; }
 .span-5  { grid-column: span 5; }
@@ -105,13 +103,12 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding-right: 24px; /* keep clear of the drag handle */
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
 .bento-card .card-title h2 {
-  font-size: 0.86rem;
+  font-size: 0.88rem;
   font-weight: 600;
   color: var(--bone);
   letter-spacing: 0.01em;
@@ -134,27 +131,43 @@
 
 .bento-reset:hover { border-color: var(--amber); color: var(--amber); }
 
+/* ===================== DENSITY / SPACING ADJUSTMENTS ===================== */
+
+main { padding-top: 26px; }
+
+.toolbar { margin-bottom: 24px; padding: 16px 18px; }
+
+.gauge-value { font-size: 1.7rem; }
+
+.eyebrow { margin-bottom: 8px; }
+
+.widget-empty { font-size: 0.82rem; color: var(--bone-faint); line-height: 1.6; }
+
+.metric-list li { padding: 8px 0; }
+
+.site-foot { margin-top: 36px; }
+
 /* ===================== RESPONSIVE COLLAPSE ===================== */
 
 @media (max-width: 1100px) {
-  .bento-grid { grid-template-columns: repeat(6, 1fr); }
+  .bento-grid { grid-template-columns: repeat(6, 1fr); gap: 14px; }
   .span-3 { grid-column: span 3; }
   .span-4, .span-5 { grid-column: span 3; }
   .span-6, .span-7, .span-8, .span-9, .span-12 { grid-column: span 6; }
 }
 
 @media (max-width: 680px) {
-  .bento-grid { grid-template-columns: 1fr; gap: 10px; }
+  .bento-grid { grid-template-columns: 1fr; gap: 12px; }
   .bento-grid [class*="span-"] { grid-column: 1 / -1; }
-  .bento-handle { opacity: 0.7; } /* always visible on touch */
+  .bento-card { padding: 16px 18px; }
 }
 
 /* ===================== FLOATING AGENT LAUNCHER ===================== */
 
 .agent-fab {
   position: fixed;
-  right: 22px;
-  bottom: 22px;
+  right: 24px;
+  bottom: 24px;
   width: 56px;
   height: 56px;
   border-radius: 50%;
@@ -203,8 +216,8 @@
 
 .agent-panel {
   position: fixed;
-  right: 22px;
-  bottom: 90px;
+  right: 24px;
+  bottom: 92px;
   width: 380px;
   max-width: calc(100vw - 32px);
   max-height: min(640px, calc(100vh - 130px));
@@ -232,7 +245,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 14px 10px;
+  padding: 16px 16px 12px;
   border-bottom: 1px solid var(--line-soft);
   flex-shrink: 0;
 }
@@ -259,19 +272,19 @@
 .agent-panel-close svg { width: 13px; height: 13px; }
 
 .agent-panel .quick-row {
-  padding: 10px 14px 0;
+  padding: 12px 16px 0;
   margin-bottom: 0;
 }
 
 .agent-panel .chat-log {
   flex: 1;
   height: auto;
-  margin: 10px 14px;
+  margin: 12px 16px;
   min-height: 160px;
 }
 
 .agent-panel .agent-row {
-  margin: 0 14px 14px;
+  margin: 0 16px 16px;
 }
 
 @media (max-width: 460px) {

@@ -1,89 +1,142 @@
 /* ---------------------------------------------------------------------
-   bento.js
-   Makes .bento-card elements inside #bentoGrid draggable and reorderable.
-   Persists card order in localStorage (this is a real deployed page,
-   not a sandboxed artifact, so localStorage is fine here).
-   Also wires the floating agent launcher (.agent-fab) to open/close
-   the existing agent panel without changing app.js's chat logic at all.
+   bento.js (v2)
+   Pointer-based drag-and-drop: press anywhere on a card's empty space
+   and drag to reorder. A press that doesn't move past a small threshold
+   is treated as a normal click, so buttons/inputs/canvas/table inside
+   the card keep working. Order persists in localStorage.
 --------------------------------------------------------------------- */
 
 (function () {
   const STORAGE_KEY = 'tremorlab.bentoOrder.v1';
+  const DRAG_THRESHOLD = 6; // px of movement before a press becomes a drag
+
+  // Elements that should never start a card-drag when pressed
+  const INTERACTIVE_SELECTOR = 'input, select, button, a, textarea, canvas, table, .card-body';
 
   function initBentoGrid() {
     const grid = document.getElementById('bentoGrid');
     if (!grid) return;
 
-    const cards = Array.from(grid.querySelectorAll('.bento-card'));
-    cards.forEach(addHandle);
+    let dragCard = null;
+    let startX = 0, startY = 0;
+    let dragging = false;
+    let pointerId = null;
+    let placeholder = null;
 
-    let dragged = null;
+    function cardFromEvent(e) {
+      return e.target.closest('.bento-card');
+    }
 
-    cards.forEach(card => {
-      const handle = card.querySelector('.bento-handle');
-      if (!handle) return;
+    function isInteractive(e) {
+      return !!e.target.closest(INTERACTIVE_SELECTOR);
+    }
 
-      handle.addEventListener('mousedown', () => { card.draggable = true; });
-      handle.addEventListener('mouseup', () => { card.draggable = false; });
-      handle.addEventListener('touchstart', () => { card.draggable = true; }, { passive: true });
+    function onPointerDown(e) {
+      if (e.button !== undefined && e.button !== 0) return; // left click / touch only
+      const card = cardFromEvent(e);
+      if (!card) return;
+      if (isInteractive(e)) return; // let the real control handle it
 
-      card.addEventListener('dragstart', e => {
-        dragged = card;
-        card.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        try { e.dataTransfer.setData('text/plain', card.dataset.cardId || ''); } catch (err) {}
-      });
+      dragCard = card;
+      startX = e.clientX;
+      startY = e.clientY;
+      dragging = false;
+      pointerId = e.pointerId;
 
-      card.addEventListener('dragend', () => {
-        card.classList.remove('dragging');
-        card.draggable = false;
-        grid.querySelectorAll('.drop-target').forEach(c => c.classList.remove('drop-target'));
-        saveOrder(grid);
-      });
+      // Don't start native text selection while we decide if this is a drag
+      document.addEventListener('pointermove', onPointerMove);
+      document.addEventListener('pointerup', onPointerUp);
+    }
 
-      card.addEventListener('dragover', e => {
-        e.preventDefault();
-        if (!dragged || dragged === card) return;
-        card.classList.add('drop-target');
-      });
+    function beginDrag(e) {
+      dragging = true;
+      dragCard.classList.add('dragging');
+      try { dragCard.setPointerCapture(pointerId); } catch (err) {}
 
-      card.addEventListener('dragleave', () => {
-        card.classList.remove('drop-target');
-      });
+      placeholder = document.createElement('div');
+      placeholder.className = dragCard.className.replace('dragging', '').trim();
+      placeholder.style.visibility = 'hidden';
+      dragCard.after(placeholder);
 
-      card.addEventListener('drop', e => {
-        e.preventDefault();
-        card.classList.remove('drop-target');
-        if (!dragged || dragged === card) return;
-        const cardsNow = Array.from(grid.children);
-        const draggedIdx = cardsNow.indexOf(dragged);
-        const targetIdx = cardsNow.indexOf(card);
-        if (draggedIdx < targetIdx) {
-          card.after(dragged);
+      dragCard.style.position = 'fixed';
+      dragCard.style.zIndex = '50';
+      dragCard.style.width = placeholder.getBoundingClientRect().width + 'px';
+      moveCardTo(e.clientX, e.clientY);
+      document.body.style.cursor = 'grabbing';
+    }
+
+    function moveCardTo(x, y) {
+      const rect = dragCard.getBoundingClientRect();
+      const offsetW = rect.width / 2;
+      dragCard.style.left = (x - offsetW) + 'px';
+      dragCard.style.top = (y - 24) + 'px';
+    }
+
+    function onPointerMove(e) {
+      if (!dragCard) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+
+      if (!dragging) {
+        if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) {
+          beginDrag(e);
         } else {
-          card.before(dragged);
+          return;
         }
+      }
+
+      moveCardTo(e.clientX, e.clientY);
+
+      // Find what card we're hovering over and reposition the placeholder
+      dragCard.style.pointerEvents = 'none';
+      const under = document.elementFromPoint(e.clientX, e.clientY);
+      dragCard.style.pointerEvents = '';
+      const targetCard = under && under.closest('.bento-card');
+      grid.querySelectorAll('.drop-target').forEach(c => c.classList.remove('drop-target'));
+
+      if (targetCard && targetCard !== dragCard && targetCard !== placeholder) {
+        targetCard.classList.add('drop-target');
+        const rect = targetCard.getBoundingClientRect();
+        const before = e.clientX < rect.left + rect.width / 2;
+        if (before) {
+          targetCard.before(placeholder);
+        } else {
+          targetCard.after(placeholder);
+        }
+      }
+    }
+
+    function onPointerUp() {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+
+      if (dragCard && dragging) {
+        dragCard.classList.remove('dragging');
+        dragCard.style.position = '';
+        dragCard.style.left = '';
+        dragCard.style.top = '';
+        dragCard.style.width = '';
+        dragCard.style.zIndex = '';
+        document.body.style.cursor = '';
+        grid.querySelectorAll('.drop-target').forEach(c => c.classList.remove('drop-target'));
+
+        if (placeholder && placeholder.parentNode) {
+          placeholder.replaceWith(dragCard);
+        }
+        saveOrder(grid);
         window.dispatchEvent(new Event('resize')); // let canvases redraw at new size
-      });
-    });
+      }
+
+      placeholder = null;
+      dragCard = null;
+      dragging = false;
+      pointerId = null;
+    }
+
+    grid.addEventListener('pointerdown', onPointerDown);
 
     restoreOrder(grid);
     addResetControl(grid);
-  }
-
-  function addHandle(card) {
-    if (card.querySelector('.bento-handle')) return;
-    const handle = document.createElement('button');
-    handle.className = 'bento-handle';
-    handle.type = 'button';
-    handle.setAttribute('aria-label', 'Drag to reorder this card');
-    handle.innerHTML = `
-      <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-        <circle cx="5" cy="3" r="1.3"/><circle cx="11" cy="3" r="1.3"/>
-        <circle cx="5" cy="8" r="1.3"/><circle cx="11" cy="8" r="1.3"/>
-        <circle cx="5" cy="13" r="1.3"/><circle cx="11" cy="13" r="1.3"/>
-      </svg>`;
-    card.appendChild(handle);
   }
 
   function saveOrder(grid) {
