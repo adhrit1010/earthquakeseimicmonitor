@@ -133,6 +133,23 @@ def safe_num(value: Any, default: float = -1.0) -> float:
         return default
 
 
+def safe_int(value: Any, default: int = -1) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("true", "t", "1", "yes")
+
+
 def pearson_correlation(a: list[float], b: list[float]) -> float:
     n = len(a)
     if n < 2 or n != len(b):
@@ -300,6 +317,10 @@ def normalize_history_event(row: dict[str, Any]) -> dict[str, Any]:
         "lis3dh_stalta": -1,
         "mpu6050_stalta": -1,
         "validation_error": confidence_to_error(row.get("confidence")),
+        # Timing metrics
+        "event_duration_ms": safe_int(row.get("event_duration_ms"), 0),
+        # Event statistics: false triggers
+        "is_false_trigger": safe_bool(row.get("is_false_trigger"), False),
     }
 
 
@@ -319,6 +340,16 @@ def normalize_live_station(row: dict[str, Any]) -> dict[str, Any]:
         "lis3dh_stalta": safe_num(row.get("lis3dh_ratio"), 0),
         "mpu6050_stalta": safe_num(row.get("mpu6050_ratio"), 0),
         "validation_error": confidence_to_error(row.get("confidence")),
+        # Timing metrics
+        "system_uptime_ms": safe_int(row.get("system_uptime_ms"), 0),
+        # Simulation metrics
+        "simulation_phase": row.get("simulation_phase") or "Idle",
+        "motor_pwm_level": safe_int(row.get("motor_pwm_level"), 0),
+        "simulation_progress": safe_num(row.get("simulation_progress"), 0),
+        # Alert & health metrics
+        "cpu_load_pct": safe_num(row.get("cpu_load_pct"), -1),
+        "cloud_sync_success_pct": safe_num(row.get("cloud_sync_success_pct"), -1),
+        "battery_voltage": safe_num(row.get("battery_voltage"), -1),
     }
 
 
@@ -361,6 +392,66 @@ def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, A
     return []
 
 
+def fetch_waveform(event_id: Any) -> dict[str, Any] | None:
+    """
+    Fetch the raw waveform row for a single event from station_waveform,
+    keyed by event_id. Returns None if not configured, not found, or the
+    event has no waveform row yet (e.g. ESP32 hasn't been updated to send
+    raw samples, or this row came from station_live which has no event_id).
+    """
+    if not event_id:
+        return None
+    try:
+        headers = supabase_headers()
+    except RuntimeError:
+        return None
+
+    query = urlencode({
+        "select": "*",
+        "event_id": f"eq.{event_id}",
+        "order": "created_at.desc",
+        "limit": "1",
+    })
+    url = f"{SUPABASE_URL}/rest/v1/station_waveform?{query}"
+    try:
+        result = http_json(url, headers)
+    except Exception:
+        return None
+
+    if not isinstance(result, list) or not result:
+        return None
+
+    row = result[0]
+
+    def parse_samples(value: Any) -> list[float] | None:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [safe_num(v, 0) for v in value]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [safe_num(v, 0) for v in parsed]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+        return None
+
+    return {
+        "eventId": event_id,
+        "sampleRateHz": safe_num(row.get("sample_rate_hz"), 0),
+        "adxl345Samples": parse_samples(row.get("adxl345_samples")),
+        "lis3dhSamples": parse_samples(row.get("lis3dh_samples")),
+        "mpu6050Samples": parse_samples(row.get("mpu6050_samples")),
+        "unifiedSamples": parse_samples(row.get("unified_samples")),
+        "pWaveIndex": safe_int(row.get("p_wave_index"), -1),
+        "sWaveIndex": safe_int(row.get("s_wave_index"), -1),
+        "surfaceWaveIndex": safe_int(row.get("surface_wave_index"), -1),
+        "peakAmplitude": safe_num(row.get("peak_amplitude"), -1),
+        "waveformConfidence": safe_num(row.get("waveform_confidence"), -1),
+    }
+
+
 def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {
@@ -375,6 +466,8 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "sensorAgreement": sensor_agreement(rows),
             "confidence": seismic_confidence(rows, sensor_agreement(rows)),
             "severity": severity_from_pga(-1, -1),
+            "falseTriggerCount": 0,
+            "waveform": None,
         }
 
     class_counts: dict[str, int] = {}
@@ -386,6 +479,7 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     max_mag = max(safe_num(r.get("magnitude")) for r in rows)
     errors = [safe_num(r.get("validation_error")) for r in rows if safe_num(r.get("validation_error")) >= 0]
     avg_error = sum(errors) / len(errors) if errors else None
+    false_trigger_count = sum(1 for r in rows if r.get("is_false_trigger") is True)
 
     def strength(row: dict[str, Any]) -> float:
         return safe_num(row.get("pga"), 0) + safe_num(row.get("magnitude"), 0) * 80
@@ -411,6 +505,10 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     confidence = seismic_confidence(rows, agreement)
     severity = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
 
+    # Waveform data is fetched only for the strongest event (not every row)
+    # to avoid pulling potentially large sample arrays for the whole window.
+    waveform = fetch_waveform(strongest.get("id")) if strongest else None
+
     return {
         "count": len(rows),
         "peakPga": peak_pga,
@@ -423,6 +521,8 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "sensorAgreement": agreement,
         "confidence": confidence,
         "severity": severity,
+        "falseTriggerCount": false_trigger_count,
+        "waveform": waveform,
     }
 
 
