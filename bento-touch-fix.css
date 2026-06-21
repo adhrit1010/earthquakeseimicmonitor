@@ -1,0 +1,42 @@
+/* ===================================================================
+   bento-touch-fix.css
+   Mobile drag fix — append to bento.css (or link after it).
+
+   touch-action: none is the actual fix for "drag doesn't work on
+   phone": without it, a touch-and-move on a .bento-card is captured
+   by the browser as a page-scroll gesture before bento.js's pointer
+   handlers get a usable delta, so the card never detaches.
+
+   This only applies to the card surface itself, not interactive
+   children — inputs/buttons/canvas/table/.card-body get touch-action
+   restored to auto so taps, scrolling inside a table, and native
+   controls keep working exactly as before.
+   =================================================================== */
+
+.bento-card {
+  touch-action: none;
+  -webkit-touch-callout: none;   /* stop iOS long-press callout from firing mid-press */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.bento-card input,
+.bento-card select,
+.bento-card button,
+.bento-card a,
+.bento-card textarea,
+.bento-card canvas,
+.bento-card table,
+.bento-card .card-body {
+  touch-action: auto;
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+/* While a card is actively being dragged, lock page scroll/bounce so
+   the gesture can't be hijacked by the browser mid-drag on touch. */
+body.bento-dragging-active {
+  overscroll-behavior: contain;
+  touch-action: none;
+}
