@@ -50,7 +50,7 @@
     const cy = sphereSize / 2;
     const r = sphereSize / 2 - 12;
 
-    let sphereInner = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e8c468" stroke-width="1" opacity="0.55"/>`;
+    let sphereInner = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#ffcf40" stroke-width="1" opacity="0.55"/>`;
 
     const latCount = 5;
     for (let i = 1; i < latCount; i++) {
@@ -58,12 +58,12 @@
       const yOff = (t - 0.5) * 2 * r;
       const ellipseRx = r;
       const ellipseRy = Math.max(2, r * 0.18) * (1 - Math.abs(t - 0.5) * 0.6);
-      sphereInner += `<ellipse class="lat-line" cx="${cx}" cy="${(cy + yOff).toFixed(2)}" rx="${ellipseRx.toFixed(2)}" ry="${ellipseRy.toFixed(2)}" fill="none" stroke="#e8c468" stroke-width="0.75" opacity="0.4"/>`;
+      sphereInner += `<ellipse class="lat-line" cx="${cx}" cy="${(cy + yOff).toFixed(2)}" rx="${ellipseRx.toFixed(2)}" ry="${ellipseRy.toFixed(2)}" fill="none" stroke="#ffcf40" stroke-width="0.75" opacity="0.4"/>`;
     }
 
     const lonCount = 6;
     for (let i = 0; i < lonCount; i++) {
-      sphereInner += `<ellipse class="lon-line" cx="${cx}" cy="${cy}" rx="${r}" ry="${r}" fill="none" stroke="#e8c468" stroke-width="0.75" opacity="0.4"/>`;
+      sphereInner += `<ellipse class="lon-line" cx="${cx}" cy="${cy}" rx="${r}" ry="${r}" fill="none" stroke="#ffcf40" stroke-width="0.75" opacity="0.4"/>`;
     }
 
     sphereSvg.innerHTML = sphereInner;
@@ -83,10 +83,10 @@
     ringSvg.style.bottom = '-160px';
     // NO filter here either
 
-    let ringInner = `<circle cx="350" cy="350" r="3" fill="#e8c468" opacity="0.7"/>`;
+    let ringInner = `<circle cx="350" cy="350" r="3" fill="#ffcf40" opacity="0.7"/>`;
     const ringCount = 4;
     for (let i = 0; i < ringCount; i++) {
-      ringInner += `<circle class="wave-ring" cx="350" cy="350" r="18" fill="none" stroke="#e8c468" stroke-width="1.4"
+      ringInner += `<circle class="wave-ring" cx="350" cy="350" r="18" fill="none" stroke="#ffcf40" stroke-width="1.4"
         style="transform-origin: 350px 350px; animation: depth-ring-expand 9s ease-out infinite; animation-delay: ${(i * 9) / ringCount}s;"/>`;
     }
     ringSvg.innerHTML = ringInner;
