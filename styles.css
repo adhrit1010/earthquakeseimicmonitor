@@ -17,8 +17,8 @@
   --bone-dim:   #9aa3a3;
   --bone-faint: #5d6566;
 
-  --amber:      #e8c468;
-  --amber-dim:  #8a753f;
+  --amber:      #ffcf40;
+  --amber-dim:  #997c26;
   --moss:       #5fb88a;
   --moss-dim:   #3a6e54;
   --clay:       #d6664a;
@@ -27,7 +27,7 @@
   --font-display: 'Space Grotesk', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Consolas, monospace;
 
-  --radius: 3px;
+  --radius: 12px;
 }
 
 * { box-sizing: border-box; }
@@ -40,7 +40,7 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(ellipse 1200px 600px at 50% -10%, rgba(232,196,104,0.06), transparent 60%),
+    radial-gradient(ellipse 1200px 600px at 50% -10%, rgba(255,207,64,0.07), transparent 60%),
     var(--ink);
   color: var(--bone);
   font-family: var(--font-mono);
@@ -327,7 +327,7 @@ input[type="date"]:focus, select:focus, input[type="text"]:focus, .agent-row inp
   font-weight: 600;
 }
 
-.btn-primary:hover { background: #f0d27e; }
+.btn-primary:hover { background: #ffe080; }
 
 .toggle {
   display: inline-flex;
@@ -618,7 +618,7 @@ th {
   background: var(--ink-panel);
 }
 
-tbody tr:hover { background: rgba(232,196,104,0.04); }
+tbody tr:hover { background: rgba(255,207,64,0.05); }
 
 .empty-state { color: var(--bone-faint); text-align: center; padding: 24px !important; }
 
