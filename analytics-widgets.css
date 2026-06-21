@@ -1,0 +1,183 @@
+/* ===================================================================
+   analytics-widgets.css
+   Styles for the three cards rendered by analytics-widgets.js:
+   Sensor Correlation Analyzer, Seismic Confidence Meter, Event
+   Severity Gauge. Reuses the palette/type tokens from styles.css and
+   the carved/embossed neumorphic shadow language from depth.css.
+   =================================================================== */
+
+/* ===================== SENSOR CORRELATION ===================== */
+
+.agreement-score {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.agreement-value {
+  font-family: var(--font-display);
+  font-size: 2.1rem;
+  font-weight: 700;
+  color: var(--amber);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.agreement-key {
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bone-faint);
+}
+
+.agreement-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow:
+    inset 2px 2px 5px rgba(0,0,0,0.5),
+    inset -1px -1px 3px rgba(255,255,255,0.025);
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+
+.agreement-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--clay), var(--amber), var(--moss));
+  border-radius: inherit;
+  transition: width 0.5s ease;
+}
+
+.pairwise-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.78rem;
+}
+
+.pairwise-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--bone-dim);
+}
+
+.pairwise-list li:last-child { border-bottom: none; }
+
+.pairwise-list li span:last-child {
+  color: var(--bone);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===================== SEISMIC CONFIDENCE ===================== */
+
+.confidence-gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 6px 0 2px;
+}
+
+.confidence-dial {
+  --pct: 0;
+  position: relative;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 50% 50%, var(--ink-panel) 62%, transparent 63%),
+    conic-gradient(var(--amber) calc(var(--pct) * 1%), var(--line-soft) 0);
+  box-shadow:
+    inset 3px 3px 8px rgba(0,0,0,0.5),
+    inset -2px -2px 6px rgba(255,255,255,0.03),
+    0 0 18px rgba(255,207,64,0.14);
+  transition: background 0.4s ease;
+}
+
+.confidence-value {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--bone);
+  font-variant-numeric: tabular-nums;
+}
+
+.confidence-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow:
+    inset 2px 2px 5px rgba(0,0,0,0.5),
+    inset -1px -1px 3px rgba(255,255,255,0.025);
+}
+
+.conf-low      { color: var(--clay); }
+.conf-medium   { color: var(--amber-dim); }
+.conf-high     { color: var(--moss); }
+.conf-veryhigh { color: var(--amber); }
+
+/* ===================== EVENT SEVERITY ===================== */
+
+.severity-value {
+  font-family: var(--font-display);
+  font-size: 1.9rem;
+  font-weight: 700;
+  color: var(--amber);
+  line-height: 1.1;
+  margin-bottom: 16px;
+}
+
+.severity-track {
+  display: flex;
+  gap: 6px;
+}
+
+.severity-step {
+  flex: 1;
+  text-align: center;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bone-faint);
+  padding: 9px 4px;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow:
+    inset 2px 2px 5px rgba(0,0,0,0.5),
+    inset -1px -1px 3px rgba(255,255,255,0.02);
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.severity-step.active {
+  color: var(--ink);
+  background: var(--amber-dim);
+  box-shadow: none;
+}
+
+.severity-step.current {
+  background: var(--amber);
+  color: var(--ink);
+  font-weight: 700;
+  box-shadow:
+    0 0 10px rgba(255,207,64,0.45),
+    0 2px 6px rgba(0,0,0,0.35);
+}
+
+@media (max-width: 460px) {
+  .severity-track { flex-wrap: wrap; }
+  .severity-step { flex: 1 1 30%; }
+}
