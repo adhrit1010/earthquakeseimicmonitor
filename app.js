@@ -98,9 +98,9 @@ function drawHelicorder() {
   const scale = (rect.height * 0.42) / Math.max(0.5, max);
 
   // glow pass
-  ctx.shadowColor = 'rgba(232,196,104,0.45)';
+  ctx.shadowColor = 'rgba(255,207,64,0.5)';
   ctx.shadowBlur = 6;
-  ctx.strokeStyle = '#e8c468';
+  ctx.strokeStyle = '#ffcf40';
   ctx.lineWidth = 1.6;
   ctx.beginPath();
   buf.forEach((v, i) => {
@@ -115,7 +115,7 @@ function drawHelicorder() {
   // bright head dot at the most recent sample
   const lastX = rect.width;
   const lastY = mid - (buf[buf.length - 1] - 1) * scale;
-  ctx.fillStyle = '#f0d27e';
+  ctx.fillStyle = '#ffe080';
   ctx.beginPath();
   ctx.arc(lastX - 2, lastY, 3, 0, Math.PI * 2);
   ctx.fill();
@@ -211,7 +211,7 @@ function drawClassChart(rows) {
   const bw = rect.width / entries.length;
   entries.forEach(([name, count], i) => {
     const h = (count / max) * (rect.height - 46);
-    ctx.fillStyle = '#e8c468';
+    ctx.fillStyle = '#ffcf40';
     ctx.globalAlpha = 0.85;
     ctx.fillRect(i * bw + 6, rect.height - h - 26, Math.max(4, bw - 12), h);
     ctx.globalAlpha = 1;
@@ -223,7 +223,7 @@ function drawClassChart(rows) {
 
 function drawStalta(rows) {
   const merged = rows.map(r => ({ v: mergedRatio(r) }));
-  drawLine('staltaChart', merged, 'v', '#e8c468');
+  drawLine('staltaChart', merged, 'v', '#ffcf40');
 }
 
 /* ---------------------------------------------------------------------
