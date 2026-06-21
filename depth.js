@@ -1,32 +1,28 @@
 /* ---------------------------------------------------------------------
-   depth.js
-   Two independent jobs, kept separate so either can be dropped without
-   breaking the other:
+   depth.js (v3 — fixed position:fixed breaking)
 
-   1. buildDepthBackground() — injects one ambient SVG into the page,
-      behind everything (.depth-bg, z-index 0). It's a slow-rotating
-      wireframe sphere (latitude/longitude mesh, like a globe a
-      hypocenter sits inside) plus a few concentric "wavefront" rings
-      that drift outward and fade — both rendered as thin gold
-      strokes only, so it reads as instrumentation, not decoration.
-      Pure SVG/CSS animation, no canvas loop, no JS per-frame cost.
+   ROOT CAUSE OF THE BUG:
+   depth.js was injecting .depth-bg with `insertBefore(wrap, body.firstChild)`,
+   making it the FIRST element in <body>. The SVGs inside .depth-bg had
+   `filter: drop-shadow(...)` applied via depth.css. A CSS `filter` on
+   any element creates a new stacking context — and critically, when that
+   filtered element is an ancestor or early sibling of position:fixed
+   elements, it can break their fixed positioning in Chromium, causing
+   them to position relative to the document instead of the viewport.
 
-   2. initScrollReveal() — IntersectionObserver that adds .reveal-in to
-      cards as they enter the viewport, staggered slightly per card.
-      Cards start tagged .reveal-pending in HTML-less fashion (added
-      here at init) so there's no flash-of-unstyled-content if this
-      script loads slightly after first paint.
+   FIX (two parts):
+   1. Append .depth-bg at the END of <body> (after the FAB and panel)
+      instead of prepending it, so filtered elements never precede fixed
+      ones in the paint order.
+   2. Remove `filter: drop-shadow` from the SVGs entirely — the subtle
+      glow isn't worth the stacking-context side-effects. Opacity alone
+      is used for the ambient fade effect instead.
+
+   Everything else (sphere, rings, scroll-reveal) is unchanged.
 --------------------------------------------------------------------- */
 
 (function () {
   const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  // Ambient background motion is decoration, not function. On a phone,
-  // the CPU/GPU budget is already spent on the live helicorder trace and
-  // chart canvases — adding a second, purely cosmetic animation loop on
-  // top of that is the kind of thing that turns "smooth" into "laggy."
-  // Skipping it below a coarse-pointer/narrow-viewport threshold keeps
-  // the signature visual on desktop where there's budget for it, without
-  // costing anything functional on mobile.
   const SKIP_AMBIENT_MOTION = REDUCED_MOTION
     || window.matchMedia('(pointer: coarse)').matches
     || window.innerWidth < 760;
@@ -34,17 +30,12 @@
   /* ===================== AMBIENT GOLD WIREFRAME ===================== */
 
   function buildDepthBackground() {
-    if (SKIP_AMBIENT_MOTION) return; // see SKIP_AMBIENT_MOTION above — mobile gets none of this
-    if (document.querySelector('.depth-bg')) return; // don't double-inject on hot reload
+    if (SKIP_AMBIENT_MOTION) return;
+    if (document.querySelector('.depth-bg')) return;
     const wrap = document.createElement('div');
     wrap.className = 'depth-bg';
     wrap.setAttribute('aria-hidden', 'true');
 
-    // ---- Sphere: latitude/longitude wireframe, slow Y-axis spin ----
-    // Built as a set of ellipses standing in for great-circle lines,
-    // viewed from a fixed angle — cheap, no real 3D math needed since
-    // the rotation is just animating each ellipse's rx over time to
-    // fake parallax (a classic 2D-wireframe-globe trick).
     const sphereSize = 520;
     const sphereSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     sphereSvg.setAttribute('viewBox', `0 0 ${sphereSize} ${sphereSize}`);
@@ -53,6 +44,7 @@
     sphereSvg.classList.add('depth-sphere');
     sphereSvg.style.right = '-120px';
     sphereSvg.style.top = '8%';
+    // NO filter here — filter on SVG breaks position:fixed on siblings
 
     const cx = sphereSize / 2;
     const cy = sphereSize / 2;
@@ -60,39 +52,28 @@
 
     let sphereInner = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e8c468" stroke-width="1" opacity="0.55"/>`;
 
-    // Latitude lines: horizontal ellipses at varying heights, flattened
     const latCount = 5;
     for (let i = 1; i < latCount; i++) {
-      const t = i / latCount; // 0..1
+      const t = i / latCount;
       const yOff = (t - 0.5) * 2 * r;
       const ellipseRx = r;
       const ellipseRy = Math.max(2, r * 0.18) * (1 - Math.abs(t - 0.5) * 0.6);
-      sphereInner += `<ellipse class="lat-line" data-base-ry="${ellipseRy.toFixed(2)}" cx="${cx}" cy="${(cy + yOff).toFixed(2)}" rx="${ellipseRx.toFixed(2)}" ry="${ellipseRy.toFixed(2)}" fill="none" stroke="#e8c468" stroke-width="0.75" opacity="0.4"/>`;
+      sphereInner += `<ellipse class="lat-line" cx="${cx}" cy="${(cy + yOff).toFixed(2)}" rx="${ellipseRx.toFixed(2)}" ry="${ellipseRy.toFixed(2)}" fill="none" stroke="#e8c468" stroke-width="0.75" opacity="0.4"/>`;
     }
 
-    // Longitude lines: vertical ellipses, rx animates to fake rotation
     const lonCount = 6;
     for (let i = 0; i < lonCount; i++) {
-      const phase = (i / lonCount) * Math.PI;
-      sphereInner += `<ellipse class="lon-line" data-phase="${phase.toFixed(3)}" cx="${cx}" cy="${cy}" rx="${r}" ry="${r}" fill="none" stroke="#e8c468" stroke-width="0.75" opacity="0.4" transform="rotate(0 ${cx} ${cy})"/>`;
+      sphereInner += `<ellipse class="lon-line" cx="${cx}" cy="${cy}" rx="${r}" ry="${r}" fill="none" stroke="#e8c468" stroke-width="0.75" opacity="0.4"/>`;
     }
 
     sphereSvg.innerHTML = sphereInner;
 
-    // Apply the longitude "rotation" by scaling rx per-ellipse via CSS
-    // custom animation (handled below with a JS rAF-free CSS approach):
-    // each lon-line gets a unique animation-delay so a single shared
-    // keyframe (squash rx 1 -> 0.05 -> 1) reads as independent meridians
-    // sweeping across the sphere as it spins.
     sphereSvg.querySelectorAll('.lon-line').forEach((el, i) => {
       el.style.transformOrigin = `${cx}px ${cy}px`;
       el.style.animation = `depth-lon-spin 22s linear infinite`;
       el.style.animationDelay = `${(i / lonCount) * -22}s`;
     });
 
-    // ---- Wavefront rings: concentric circles drifting outward + fading,
-    // standing in for a P-wave radiating from a hypocenter. Lower-left,
-    // away from the sphere, so the two elements don't visually collide. ----
     const ringSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     ringSvg.setAttribute('viewBox', '0 0 700 700');
     ringSvg.setAttribute('width', 700);
@@ -100,6 +81,7 @@
     ringSvg.classList.add('depth-rings');
     ringSvg.style.left = '-180px';
     ringSvg.style.bottom = '-160px';
+    // NO filter here either
 
     let ringInner = `<circle cx="350" cy="350" r="3" fill="#e8c468" opacity="0.7"/>`;
     const ringCount = 4;
@@ -111,7 +93,12 @@
 
     wrap.appendChild(sphereSvg);
     wrap.appendChild(ringSvg);
-    document.body.insertBefore(wrap, document.body.firstChild);
+
+    // FIX: append to END of body, not insertBefore(firstChild).
+    // Prepending placed this filtered element before the FAB/panel in
+    // the DOM, which caused Chromium to break position:fixed on them.
+    // Appending last means it never precedes any fixed element.
+    document.body.appendChild(wrap);
 
     injectKeyframes();
 
@@ -170,9 +157,6 @@
       });
     }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
 
-    // Stagger by document order within each row-ish cluster, cheaply:
-    // index by position in the NodeList, capped so late cards on long
-    // pages don't wait seconds to appear.
     targets.forEach((el, i) => {
       el.dataset.revealIndex = Math.min(i, 8);
       observer.observe(el);
