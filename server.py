@@ -303,9 +303,14 @@ def confidence_to_error(value: Any) -> float:
 
 def normalize_history_event(row: dict[str, Any]) -> dict[str, Any]:
     pga = safe_num(row.get("pga_cm_s2"))
+    # Preserve the raw event_id separately so fetch_waveform can use it.
+    # The normalised "id" field must equal event_id for history rows so the
+    # waveform lookup (which queries station_waveform.event_id) works correctly.
+    event_id = row.get("event_id") or row.get("id")
     return {
         **row,
-        "id": row.get("event_id") or row.get("id"),
+        "id": event_id,
+        "event_id": event_id,          # explicit, never lost by spread
         "source": "earthquake_history",
         "timestamp": iso_from_timestamp_ms(row.get("timestamp_ms"), row.get("created_at")),
         "classification": row.get("classification") or "Unknown",
@@ -328,7 +333,10 @@ def normalize_live_station(row: dict[str, Any]) -> dict[str, Any]:
     pga = safe_num(row.get("pga_cm_s2"))
     return {
         **row,
+        # station_live rows have no event_id — waveform lookup won't be
+        # attempted for them (summarize_events guards on source == "earthquake_history").
         "id": row.get("station_id"),
+        "event_id": None,
         "source": "station_live",
         "timestamp": iso_from_timestamp_ms(row.get("timestamp_ms"), row.get("updated_at")),
         "classification": row.get("classification") or "Unknown",
@@ -392,13 +400,25 @@ def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, A
     return []
 
 
-def fetch_waveform(event_id: Any) -> dict[str, Any] | None:
+def fetch_waveform(event_id: Any, source: str = "earthquake_history") -> dict[str, Any] | None:
     """
-    Fetch the raw waveform row for a single event from station_waveform,
-    keyed by event_id. Returns None if not configured, not found, or the
-    event has no waveform row yet (e.g. ESP32 hasn't been updated to send
-    raw samples, or this row came from station_live which has no event_id).
+    Fetch the raw waveform row for a single event from station_waveform.
+
+    station_waveform.event_id is only meaningful for earthquake_history rows —
+    station_live rows have no persistent event_id, so we skip the lookup for them
+    rather than returning a misleading empty result.
+
+    Returns None if:
+      - source is not "earthquake_history"
+      - event_id is falsy
+      - Supabase is not configured
+      - no matching row exists (the ESP32 hasn't sent raw samples for this event yet)
+      - the row exists but all sample arrays are null/empty
+    Also sets waveform["hasUsableData"] = True/False so the frontend can
+    distinguish "row found but empty" from "no row at all".
     """
+    if source != "earthquake_history":
+        return None
     if not event_id:
         return None
     try:
@@ -427,28 +447,52 @@ def fetch_waveform(event_id: Any) -> dict[str, Any] | None:
         if value is None:
             return None
         if isinstance(value, list):
-            return [safe_num(v, 0) for v in value]
+            parsed = [safe_num(v, 0) for v in value]
+            return parsed if parsed else None
         if isinstance(value, str):
             try:
-                parsed = json.loads(value)
-                if isinstance(parsed, list):
-                    return [safe_num(v, 0) for v in parsed]
+                parsed_list = json.loads(value)
+                if isinstance(parsed_list, list) and parsed_list:
+                    return [safe_num(v, 0) for v in parsed_list]
             except (TypeError, ValueError, json.JSONDecodeError):
                 return None
         return None
 
+    adxl_samples = parse_samples(row.get("adxl345_samples"))
+    lis_samples = parse_samples(row.get("lis3dh_samples"))
+    mpu_samples = parse_samples(row.get("mpu6050_samples"))
+    unified_samples = parse_samples(row.get("unified_samples"))
+
+    sample_rate_hz = safe_num(row.get("sample_rate_hz"), 0)
+    # Guard: treat 0 or negative sample rate as unknown so the frontend
+    # doesn't compute Infinity seconds for wave-marker indices.
+    sample_rate_hz = sample_rate_hz if sample_rate_hz > 0 else None
+
+    p_wave_index = safe_int(row.get("p_wave_index"), -1)
+    s_wave_index = safe_int(row.get("s_wave_index"), -1)
+    surface_wave_index = safe_int(row.get("surface_wave_index"), -1)
+    peak_amplitude = safe_num(row.get("peak_amplitude"), -1)
+    waveform_confidence = safe_num(row.get("waveform_confidence"), -1)
+
+    # Determine whether any of the data is actually usable so the frontend
+    # can show a meaningful state instead of a table full of "Not wired yet".
+    has_samples = any(s is not None for s in [adxl_samples, lis_samples, mpu_samples, unified_samples])
+    has_markers = any(i >= 0 for i in [p_wave_index, s_wave_index, surface_wave_index])
+    has_usable_data = has_samples or has_markers or peak_amplitude >= 0
+
     return {
         "eventId": event_id,
-        "sampleRateHz": safe_num(row.get("sample_rate_hz"), 0),
-        "adxl345Samples": parse_samples(row.get("adxl345_samples")),
-        "lis3dhSamples": parse_samples(row.get("lis3dh_samples")),
-        "mpu6050Samples": parse_samples(row.get("mpu6050_samples")),
-        "unifiedSamples": parse_samples(row.get("unified_samples")),
-        "pWaveIndex": safe_int(row.get("p_wave_index"), -1),
-        "sWaveIndex": safe_int(row.get("s_wave_index"), -1),
-        "surfaceWaveIndex": safe_int(row.get("surface_wave_index"), -1),
-        "peakAmplitude": safe_num(row.get("peak_amplitude"), -1),
-        "waveformConfidence": safe_num(row.get("waveform_confidence"), -1),
+        "sampleRateHz": sample_rate_hz,          # None if unknown/zero, not 0
+        "adxl345Samples": adxl_samples,
+        "lis3dhSamples": lis_samples,
+        "mpu6050Samples": mpu_samples,
+        "unifiedSamples": unified_samples,
+        "pWaveIndex": p_wave_index if p_wave_index >= 0 else None,
+        "sWaveIndex": s_wave_index if s_wave_index >= 0 else None,
+        "surfaceWaveIndex": surface_wave_index if surface_wave_index >= 0 else None,
+        "peakAmplitude": peak_amplitude,
+        "waveformConfidence": waveform_confidence,
+        "hasUsableData": has_usable_data,
     }
 
 
@@ -505,9 +549,11 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     confidence = seismic_confidence(rows, agreement)
     severity = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
 
-    # Waveform data is fetched only for the strongest event (not every row)
-    # to avoid pulling potentially large sample arrays for the whole window.
-    waveform = fetch_waveform(strongest.get("id")) if strongest else None
+    # Only attempt waveform lookup for earthquake_history rows — station_live
+    # rows have no persistent event_id and the lookup would always return None.
+    strongest_source = strongest.get("source", "")
+    strongest_event_id = strongest.get("event_id") if strongest_source == "earthquake_history" else None
+    waveform = fetch_waveform(strongest_event_id, source=strongest_source)
 
     return {
         "count": len(rows),
