@@ -60,7 +60,6 @@ function renderSeismicMeasurements(summary, rows) {
       ${metricRow('Distance estimate', dist, 'km')}
       ${metricRow('Validation error', verr, '%')}
     </ul>
-    <p class="widget-note">From the strongest event in the loaded window, or the most recent row if no summary is available.</p>
   `;
 }
 
@@ -93,7 +92,6 @@ function renderDetectionMetrics(summary, rows) {
       ${metricRow('Sensor agreement', agreementVal, '%')}
       ${metricRow('Detection confidence', confidenceVal, '%')}
     </ul>
-    <p class="widget-note">STA/LTA ratios from the strongest event; agreement and confidence are window-wide.</p>
   `;
 }
 
@@ -119,19 +117,7 @@ function renderWaveformMetrics(summary) {
   if (!wf) {
     card.innerHTML = `
       <span class="eyebrow">Waveform metrics</span>
-      <ul class="metric-list">
-        ${metricRow('ADXL345 waveform', null, null)}
-        ${metricRow('LIS3DH waveform', null, null)}
-        ${metricRow('MPU6050 waveform', null, null)}
-        ${metricRow('Unified seismic waveform', null, null)}
-        ${metricRow('P-wave marker', null, null)}
-        ${metricRow('S-wave marker', null, null)}
-        ${metricRow('Surface wave marker', null, null)}
-        ${metricRow('Peak amplitude', null, null)}
-        ${metricRow('P&ndash;S gap', null, 's')}
-        ${metricRow('Waveform confidence', null, '%')}
-      </ul>
-      <p class="widget-note">No station_waveform row found for the strongest event yet. Requires the ESP32 to write raw sample arrays keyed by event_id.</p>
+      <p class="widget-empty">No station_waveform row for this event yet &mdash; point the ESP32's raw adxl345/lis3dh/mpu6050 sample writes at this event_id to populate it.</p>
     `;
     return;
   }
@@ -159,6 +145,7 @@ function renderWaveformMetrics(summary) {
   card.innerHTML = `
     <span class="eyebrow">Waveform metrics</span>
     <ul class="metric-list">
+      ${metricRow('Sample rate', sampleRate, 'Hz')}
       ${metricRow('ADXL345 waveform', channelStatus(wf.adxl345Samples), null)}
       ${metricRow('LIS3DH waveform', channelStatus(wf.lis3dhSamples), null)}
       ${metricRow('MPU6050 waveform', channelStatus(wf.mpu6050Samples), null)}
@@ -170,7 +157,6 @@ function renderWaveformMetrics(summary) {
       ${metricRow('P&ndash;S gap', gap, 's')}
       ${metricRow('Waveform confidence', wfConfidence, '%')}
     </ul>
-    <p class="widget-note">From station_waveform for the strongest event in this window${sampleRate ? ` &middot; sampled at ${sampleRate} Hz` : ''}. Markers are converted from sample index to seconds using the row's sample rate.</p>
   `;
 }
 
@@ -215,7 +201,6 @@ function renderTimingMetrics(summary, rows) {
       ${metricRow('Event duration', duration, 's')}
       ${metricRow('System uptime', uptime, null)}
     </ul>
-    <p class="widget-note">P/S arrival and event duration come from the strongest event (earthquake_history). System uptime only appears when the reference row is a live station_live reading.</p>
   `;
 }
 
@@ -254,7 +239,6 @@ function renderSimulationMetrics(rows) {
       ${metricRow('Motor PWM level', pwm, '0&ndash;255')}
       ${metricRow('Simulation progress', progress, '%')}
     </ul>
-    <p class="widget-note">Phase options: Idle, P-Wave, Gap, S-Wave, Surface Wave, Decay. From the most recent station_live row in this window.</p>
   `;
 }
 
@@ -289,7 +273,6 @@ function renderHealthMetrics(rows) {
       ${metricRow('Cloud sync success rate', syncRate, '%')}
       ${metricRow('Battery voltage', battery, 'V')}
     </ul>
-    <p class="widget-note">All fields come from the most recent live station_live row. Values stay "Not wired yet" until the ESP32 firmware actually reports them (defaults are -1 / unset).</p>
   `;
 }
 
@@ -333,7 +316,6 @@ function renderEventStatistics(summary, rows) {
       ${metricRow('Largest magnitude', largeMag, null)}
       ${metricRow('Average distance', avgDist, 'km')}
     </ul>
-    <p class="widget-note">Computed from all events currently loaded in this window. False triggers count rows with is_false_trigger = true in earthquake_history.</p>
   `;
 }
 
