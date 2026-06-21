@@ -30,9 +30,36 @@
   // Elements that should never start a card-drag when pressed
   const INTERACTIVE_SELECTOR = 'input, select, button, a, textarea, canvas, table, .card-body';
 
+  // Drag-to-reorder is a desktop power-user feature: a mouse can hover,
+  // pick up, and drop a card without ever competing with scrolling.
+  // On a touch-primary device, the exact same gesture vocabulary (press
+  // and move) is also how the user scrolls the page, and a phone screen
+  // is mostly covered by card surfaces — so enabling drag there means
+  // most ordinary scroll attempts begin life as a possible drag, and the
+  // browser can't treat the touch as a scroll until *after* our drag
+  // threshold has resolved. That's the actual cause of "laggy, no room
+  // to scroll" on phones. Drag-to-reorder also is not really useful on
+  // mobile, since dragging a full-width stacked card past other
+  // full-width stacked cards is awkward at any size.
+  //
+  // (prefers-reduced-motion users are not assumed to be on touch, so
+  // motion preference is left untouched here — this checks input type.)
+  const IS_TOUCH_PRIMARY = window.matchMedia('(pointer: coarse)').matches;
+
   function initBentoGrid() {
     const grid = document.getElementById('bentoGrid');
     if (!grid) return;
+
+    if (IS_TOUCH_PRIMARY) {
+      // Skip attaching any drag listeners and skip the CSS lock entirely
+      // — cards behave like plain static content, and native scrolling
+      // is never intercepted. Order restore/reset still apply, in case
+      // someone set a custom order on desktop and later opens the same
+      // browser profile on a tablet that's still coarse-pointer.
+      restoreOrder(grid);
+      addResetControl(grid);
+      return;
+    }
 
     let dragCard = null;
     let startX = 0, startY = 0;
