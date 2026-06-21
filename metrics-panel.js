@@ -8,6 +8,15 @@
    Fields with no backend source yet render "Not wired yet" so nothing
    on screen looks like real telemetry when it isn't.
 
+   This version is wired to the full supabase_schema.sql:
+     - station_waveform: adxl345/lis3dh/mpu6050/unified_samples,
+       p_wave_index, s_wave_index, surface_wave_index, peak_amplitude,
+       waveform_confidence  -> summary.waveform (from server.py fetch_waveform)
+     - station_live: simulation_phase, motor_pwm_level,
+       simulation_progress, cpu_load_pct, cloud_sync_success_pct,
+       battery_voltage
+     - earthquake_history: event_duration_ms, is_false_trigger
+
    Depends on global `el()` and `fmt()` from app.js (loaded first).
 --------------------------------------------------------------------- */
 
@@ -89,33 +98,90 @@ function renderDetectionMetrics(summary, rows) {
 }
 
 /* ---------------------------------------------------------------------
-   Waveform Metrics (not wired: schema stores STA/LTA ratios, not raw
-   waveform sample arrays, so there is nothing real to plot here yet)
+   Waveform Metrics
+   Now wired to summary.waveform, which server.py's fetch_waveform()
+   populates from station_waveform for the strongest event:
+     adxl345Samples, lis3dhSamples, mpu6050Samples, unifiedSamples,
+     pWaveIndex, sWaveIndex, surfaceWaveIndex,
+     peakAmplitude, waveformConfidence, sampleRateHz
+
+   Sample arrays themselves aren't itemized as metric rows (they're
+   raw signal data, not a single value) -- this renders the markers
+   derived from them plus a presence indicator for each channel's
+   array, so the card honestly reflects what's actually in Supabase.
 --------------------------------------------------------------------- */
 
-function renderWaveformMetrics() {
+function renderWaveformMetrics(summary) {
   const card = document.getElementById('waveformMetricsCard');
   if (!card) return;
+  const wf = summary && summary.waveform;
+
+  if (!wf) {
+    card.innerHTML = `
+      <span class="eyebrow">Waveform metrics</span>
+      <ul class="metric-list">
+        ${metricRow('ADXL345 waveform', null, null)}
+        ${metricRow('LIS3DH waveform', null, null)}
+        ${metricRow('MPU6050 waveform', null, null)}
+        ${metricRow('Unified seismic waveform', null, null)}
+        ${metricRow('P-wave marker', null, null)}
+        ${metricRow('S-wave marker', null, null)}
+        ${metricRow('Surface wave marker', null, null)}
+        ${metricRow('Peak amplitude', null, null)}
+        ${metricRow('P&ndash;S gap', null, 's')}
+        ${metricRow('Waveform confidence', null, '%')}
+      </ul>
+      <p class="widget-note">No station_waveform row found for the strongest event yet. Requires the ESP32 to write raw sample arrays keyed by event_id.</p>
+    `;
+    return;
+  }
+
+  const channelStatus = (samples) =>
+    Array.isArray(samples) && samples.length ? `${samples.length} samples` : null;
+
+  const sampleRate = Number(wf.sampleRateHz) > 0 ? Number(wf.sampleRateHz).toFixed(0) : null;
+
+  const indexToSeconds = (idx) => {
+    if (idx === null || idx === undefined || idx < 0 || !sampleRate) return null;
+    return (idx / Number(wf.sampleRateHz)).toFixed(2);
+  };
+
+  const pMarker = indexToSeconds(wf.pWaveIndex);
+  const sMarker = indexToSeconds(wf.sWaveIndex);
+  const surfaceMarker = indexToSeconds(wf.surfaceWaveIndex);
+  const gap = (pMarker !== null && sMarker !== null)
+    ? (Number(sMarker) - Number(pMarker)).toFixed(2)
+    : null;
+
+  const peakAmp = Number(wf.peakAmplitude) >= 0 ? Number(wf.peakAmplitude).toFixed(2) : null;
+  const wfConfidence = Number(wf.waveformConfidence) >= 0 ? Number(wf.waveformConfidence).toFixed(0) : null;
+
   card.innerHTML = `
     <span class="eyebrow">Waveform metrics</span>
     <ul class="metric-list">
-      ${metricRow('ADXL345 waveform', null, null)}
-      ${metricRow('LIS3DH waveform', null, null)}
-      ${metricRow('MPU6050 waveform', null, null)}
-      ${metricRow('Unified seismic waveform', null, null)}
-      ${metricRow('P-wave marker', null, null)}
-      ${metricRow('S-wave marker', null, null)}
-      ${metricRow('Surface wave marker', null, null)}
-      ${metricRow('Peak amplitude', null, null)}
-      ${metricRow('P&ndash;S gap', null, 's')}
-      ${metricRow('Waveform confidence', null, '%')}
+      ${metricRow('ADXL345 waveform', channelStatus(wf.adxl345Samples), null)}
+      ${metricRow('LIS3DH waveform', channelStatus(wf.lis3dhSamples), null)}
+      ${metricRow('MPU6050 waveform', channelStatus(wf.mpu6050Samples), null)}
+      ${metricRow('Unified seismic waveform', channelStatus(wf.unifiedSamples), null)}
+      ${metricRow('P-wave marker', pMarker, 's')}
+      ${metricRow('S-wave marker', sMarker, 's')}
+      ${metricRow('Surface wave marker', surfaceMarker, 's')}
+      ${metricRow('Peak amplitude', peakAmp, null)}
+      ${metricRow('P&ndash;S gap', gap, 's')}
+      ${metricRow('Waveform confidence', wfConfidence, '%')}
     </ul>
-    <p class="widget-note">Requires raw waveform sample arrays from the ESP32 &mdash; the current schema stores only STA/LTA ratios, not the underlying signal.</p>
+    <p class="widget-note">From station_waveform for the strongest event in this window${sampleRate ? ` &middot; sampled at ${sampleRate} Hz` : ''}. Markers are converted from sample index to seconds using the row's sample rate.</p>
   `;
 }
 
 /* ---------------------------------------------------------------------
-   Timing Metrics (real: p_wave_ms / s_wave_ms when present; rest unwired)
+   Timing Metrics
+   P/S arrival come from the strongest row's p_wave_ms/s_wave_ms.
+   Event duration now wired to earthquake_history.event_duration_ms
+   (normalize_history_event in server.py exposes it as
+   event_duration_ms on history rows). System uptime is wired when the
+   reference row is a live station_live row, which carries
+   system_uptime_ms.
 --------------------------------------------------------------------- */
 
 function renderTimingMetrics(summary, rows) {
@@ -132,40 +198,70 @@ function renderTimingMetrics(summary, rows) {
   const sArrival = hasS ? (sMs / 1000).toFixed(2) : null;
   const gap = hasP && hasS ? ((sMs - pMs) / 1000).toFixed(2) : null;
 
+  const durationMs = ref ? Number(ref.event_duration_ms) : null;
+  const duration = durationMs !== null && !Number.isNaN(durationMs) && durationMs > 0
+    ? (durationMs / 1000).toFixed(2) : null;
+
+  const uptimeMs = ref ? Number(ref.system_uptime_ms) : null;
+  const hasUptime = uptimeMs !== null && !Number.isNaN(uptimeMs) && uptimeMs > 0;
+  const uptime = hasUptime ? formatHms(uptimeMs) : null;
+
   card.innerHTML = `
     <span class="eyebrow">Timing metrics</span>
     <ul class="metric-list">
       ${metricRow('P-wave arrival time', pArrival, 's')}
       ${metricRow('S-wave arrival time', sArrival, 's')}
       ${metricRow('P&ndash;S gap', gap, 's')}
-      ${metricRow('Event duration', null, 's')}
-      ${metricRow('System uptime', null, 'hh:mm:ss')}
+      ${metricRow('Event duration', duration, 's')}
+      ${metricRow('System uptime', uptime, null)}
     </ul>
-    <p class="widget-note">P/S arrival times come from the strongest event's recorded timestamps. Event duration and uptime need new ESP32 fields.</p>
+    <p class="widget-note">P/S arrival and event duration come from the strongest event (earthquake_history). System uptime only appears when the reference row is a live station_live reading.</p>
   `;
 }
 
+function formatHms(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
 /* ---------------------------------------------------------------------
-   Simulation Metrics (not wired: ESP32 doesn't report simulator phase/PWM)
+   Simulation Metrics
+   Now wired to station_live.simulation_phase / motor_pwm_level /
+   simulation_progress. Only meaningful for live rows (source ===
+   'station_live') -- history rows from earthquake_history don't carry
+   simulator state, so this card always looks at the most recent live
+   row regardless of what's flagged as "strongest".
 --------------------------------------------------------------------- */
 
-function renderSimulationMetrics() {
+function renderSimulationMetrics(rows) {
   const card = document.getElementById('simulationMetricsCard');
   if (!card) return;
+  const liveRef = rows.find(r => r.source === 'station_live') || null;
+
+  const phase = liveRef && liveRef.simulation_phase ? liveRef.simulation_phase : null;
+  const pwm = liveRef && Number(liveRef.motor_pwm_level) >= 0 ? Number(liveRef.motor_pwm_level) : null;
+  const progress = liveRef && Number(liveRef.simulation_progress) >= 0
+    ? Number(liveRef.simulation_progress).toFixed(0) : null;
+
   card.innerHTML = `
     <span class="eyebrow">Simulation metrics</span>
     <ul class="metric-list">
-      ${metricRow('Simulation phase', null, null)}
-      ${metricRow('Motor PWM level', null, '0&ndash;255')}
-      ${metricRow('Simulation progress', null, '%')}
+      ${metricRow('Simulation phase', phase, null)}
+      ${metricRow('Motor PWM level', pwm, '0&ndash;255')}
+      ${metricRow('Simulation progress', progress, '%')}
     </ul>
-    <p class="widget-note">Phase options: Idle, P-Wave, Gap, S-Wave, Surface Wave, Decay. Needs the ESP32 to report current shaker-simulator state.</p>
+    <p class="widget-note">Phase options: Idle, P-Wave, Gap, S-Wave, Surface Wave, Decay. From the most recent station_live row in this window.</p>
   `;
 }
 
 /* ---------------------------------------------------------------------
-   Alert & Health Metrics (real: wifi_rssi / free_heap when present on
-   live station rows; rest unwired)
+   Alert & Health Metrics
+   Now wired to station_live.cpu_load_pct, cloud_sync_success_pct,
+   battery_voltage, in addition to the existing wifi_rssi/free_heap.
 --------------------------------------------------------------------- */
 
 function renderHealthMetrics(rows) {
@@ -177,22 +273,31 @@ function renderHealthMetrics(rows) {
     ? Number(liveRef.wifi_rssi) : null;
   const heap = liveRef && liveRef.free_heap !== undefined && liveRef.free_heap !== null
     ? (Number(liveRef.free_heap) / 1024).toFixed(1) : null;
+  const cpuLoad = liveRef && Number(liveRef.cpu_load_pct) >= 0
+    ? Number(liveRef.cpu_load_pct).toFixed(0) : null;
+  const syncRate = liveRef && Number(liveRef.cloud_sync_success_pct) >= 0
+    ? Number(liveRef.cloud_sync_success_pct).toFixed(0) : null;
+  const battery = liveRef && Number(liveRef.battery_voltage) >= 0
+    ? Number(liveRef.battery_voltage).toFixed(2) : null;
 
   card.innerHTML = `
     <span class="eyebrow">Alert &amp; health metrics</span>
     <ul class="metric-list">
       ${metricRow('WiFi signal strength', rssi, 'dBm')}
       ${metricRow('ESP32 free memory', heap, 'KB')}
-      ${metricRow('CPU load', null, '%')}
-      ${metricRow('Cloud sync success rate', null, '%')}
-      ${metricRow('Battery voltage', null, 'V')}
+      ${metricRow('CPU load', cpuLoad, '%')}
+      ${metricRow('Cloud sync success rate', syncRate, '%')}
+      ${metricRow('Battery voltage', battery, 'V')}
     </ul>
-    <p class="widget-note">WiFi RSSI and free memory come from the most recent live station row. CPU load, sync rate, and battery need new ESP32/backend fields.</p>
+    <p class="widget-note">All fields come from the most recent live station_live row. Values stay "Not wired yet" until the ESP32 firmware actually reports them (defaults are -1 / unset).</p>
   `;
 }
 
 /* ---------------------------------------------------------------------
-   Event Statistics (real: derived from the loaded rows window)
+   Event Statistics
+   Now wired to is_false_trigger via summary.falseTriggerCount, which
+   server.py's summarize_events() computes by counting rows where
+   is_false_trigger is true.
 --------------------------------------------------------------------- */
 
 function renderEventStatistics(summary, rows) {
@@ -201,6 +306,9 @@ function renderEventStatistics(summary, rows) {
 
   const total = rows.length;
   const confirmed = rows.filter(r => r.classification === 'Confirmed Seismic Event').length;
+
+  const falseTriggers = summary && Number.isFinite(summary.falseTriggerCount)
+    ? summary.falseTriggerCount : null;
 
   const pgaVals = rows.map(r => Number(r.pga)).filter(v => v >= 0);
   const avgPga = pgaVals.length ? (pgaVals.reduce((a, b) => a + b, 0) / pgaVals.length).toFixed(1) : null;
@@ -218,14 +326,14 @@ function renderEventStatistics(summary, rows) {
     <ul class="metric-list">
       ${metricRow('Total events', total, null)}
       ${metricRow('Confirmed events', confirmed, null)}
-      ${metricRow('False triggers', null, null)}
+      ${metricRow('False triggers', falseTriggers, null)}
       ${metricRow('Average PGA', avgPga, 'cm/s&sup2;')}
       ${metricRow('Highest PGA', highPga, 'cm/s&sup2;')}
       ${metricRow('Average magnitude', avgMag, null)}
       ${metricRow('Largest magnitude', largeMag, null)}
       ${metricRow('Average distance', avgDist, 'km')}
     </ul>
-    <p class="widget-note">Computed from all events currently loaded in this window. "False triggers" needs an explicit rejected/false-positive flag from the backend.</p>
+    <p class="widget-note">Computed from all events currently loaded in this window. False triggers count rows with is_false_trigger = true in earthquake_history.</p>
   `;
 }
 
@@ -236,9 +344,9 @@ function renderEventStatistics(summary, rows) {
 function renderExpandedMetrics(summary, rows) {
   renderSeismicMeasurements(summary, rows);
   renderDetectionMetrics(summary, rows);
-  renderWaveformMetrics();
+  renderWaveformMetrics(summary);
   renderTimingMetrics(summary, rows);
-  renderSimulationMetrics();
+  renderSimulationMetrics(rows);
   renderHealthMetrics(rows);
   renderEventStatistics(summary, rows);
 }
