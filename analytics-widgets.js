@@ -32,7 +32,6 @@ function renderSensorAgreement(summary) {
       <li><span>ADXL345 &harr; MPU6050</span><span>${pairwise.adxl345_mpu6050.toFixed(2)}</span></li>
       <li><span>LIS3DH &harr; MPU6050</span><span>${pairwise.lis3dh_mpu6050.toFixed(2)}</span></li>
     </ul>
-    <p class="widget-note">Based on ${agreement.sampleSize} rows with full sensor overlap. Pearson correlation, range -1 to 1.</p>
   `;
 }
 
@@ -78,7 +77,6 @@ function renderConfidenceMeter(summary) {
       ${compRow('STA/LTA strength', comps.staltaStrength)}
       ${compRow('Wave quality', comps.waveQuality)}
     </ul>
-    <p class="widget-note">Heuristic composite for this demo rig &mdash; not a calibrated seismological estimate.</p>
   `;
 }
 
@@ -106,7 +104,6 @@ function renderSeverityGauge(summary) {
     <span class="eyebrow">Event severity</span>
     <div class="severity-value">${severity.label}</div>
     <div class="severity-track">${stepsHtml}</div>
-    <p class="widget-note">Based on peak PGA in the loaded window. Thresholds tuned for a tabletop simulator, not field hazard classification.</p>
   `;
 }
 
