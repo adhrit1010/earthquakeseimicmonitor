@@ -71,6 +71,24 @@
   letter-spacing: 0.01em;
 }
 
+/* Field-engineer interpretation note shown beneath a metrics panel. */
+.metric-note {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--bone-faint);
+  font-style: italic;
+}
+
+.metric-note strong {
+  color: var(--amber);
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 @media (max-width: 980px) {
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }
 }

@@ -13,6 +13,10 @@ the only thing that talks to either service.
 ```text
 triaxis_dynamic_site/
   server.py              Standard-library Python backend (no dependencies)
+  firmware/
+    seismometer_v11.ino  ESP32 sketch: 3-sensor STA/LTA detection, motor
+                         shaker, Bluetooth motor control, LED + buzzer alerts,
+                         and the Supabase uploader the dashboard reads from
   api/                   Thin wrappers so the same handler also works as
     agent.py             Vercel serverless functions (one file per route)
     analytics.py
