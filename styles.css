@@ -209,6 +209,54 @@ a { color: var(--amber); }
   margin-top: 2px;
 }
 
+/* Device alert tile — LED + buzzer state, mirrored from real sensor triggers. */
+.device-alert .alert-outputs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.alert-led,
+.alert-buzzer {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  color: var(--bone-faint);
+  background: var(--ink);
+  transition: color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+}
+
+/* Triggered: LED lights amber, buzzer lights clay (red), both glowing. */
+.alert-led[data-on="true"] {
+  color: var(--ink);
+  background: var(--amber);
+  border-color: var(--amber);
+  box-shadow: 0 0 10px rgba(255, 207, 64, 0.7);
+}
+
+.alert-buzzer[data-on="true"] {
+  color: var(--ink);
+  background: var(--clay);
+  border-color: var(--clay);
+  box-shadow: 0 0 10px rgba(214, 102, 74, 0.7);
+  animation: alert-buzz 0.5s steps(2) infinite;
+}
+
+/* When the current row carries no trigger booleans (e.g. history-only data),
+   dim the whole tile so it's clearly "not live" rather than "idle". */
+.device-alert[data-live="false"] {
+  opacity: 0.4;
+}
+
+@keyframes alert-buzz {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-1px); }
+}
+
 .helicorder-canvas-wrap {
   position: relative;
   max-width: 1320px;

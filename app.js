@@ -191,6 +191,12 @@ async function pollHelicorder() {
     if (!rows.length) return;
 
     const chronological = rows.slice().reverse();
+
+    // Keep the live state + LED/buzzer alert tracking the freshest row on the
+    // fast 2 s cadence, so they update continuously instead of only on the
+    // slower full-dashboard refresh.
+    applyLiveState(chronological[chronological.length - 1]);
+
     const fresh = chronological
       .map(r => ({ ts: r.timestamp, v: mergedRatio(r) }))
       .filter(r => r.v >= 0);
@@ -227,13 +233,47 @@ function setHelicorderPolling() {
   state.helicorderPollTimer = setInterval(pollHelicorder, HELICORDER_POLL_MS);
 }
 
+// Build the live "state" label from a single row, including the simulation
+// phase when the shaker is running so the readout isn't stuck on one word.
+function liveStateLabel(row) {
+  if (!row) return 'IDLE';
+  const cls = String(row.classification || 'IDLE');
+  const phase = row.simulation_phase;
+  if (phase && phase !== 'Idle') return `${cls} · ${phase}`;
+  return cls;
+}
+
+// Device alert tile: the on-station LED + buzzer fire together the instant any
+// sensor crosses its STA/LTA threshold. We mirror that here from the REAL
+// trigger booleans in the live row — never synthesised. earthquake_history
+// rows don't carry these booleans, so the tile marks itself "not live" then.
+function updateDeviceAlert(row) {
+  const wrap = el('deviceAlert');
+  const led = el('ledIndicator');
+  const buzzer = el('buzzerIndicator');
+  if (!wrap || !led || !buzzer) return;
+  const keys = ['adxl345_triggered', 'lis3dh_triggered', 'mpu6050_triggered', 'shaker_running'];
+  const hasTriggerData = !!row && keys.some(k => typeof row[k] === 'boolean');
+  wrap.dataset.live = hasTriggerData ? 'true' : 'false';
+  const triggered = hasTriggerData && keys.some(k => row[k] === true);
+  led.dataset.on = triggered ? 'true' : 'false';
+  buzzer.dataset.on = triggered ? 'true' : 'false';
+}
+
+// Push a single live row into the live readout (STA/LTA state + device alert).
+function applyLiveState(row) {
+  if (!row) return;
+  el('liveClass').textContent = liveStateLabel(row).toUpperCase();
+  updateDeviceAlert(row);
+}
+
 function updateLiveReadout(summary, rows) {
-  const strongest = summary && summary.strongest;
-  if (strongest) {
-    el('liveClass').textContent = (strongest.classification || 'IDLE').toUpperCase();
-  } else if (rows.length) {
-    el('liveClass').textContent = (rows[0].classification || 'IDLE').toUpperCase();
-  }
+  // Reflect the NEWEST streamed row (rows arrive newest-first) instead of the
+  // frozen strongest historical event — that stale binding is exactly why the
+  // live state and alert sat constant between refreshes.
+  const newest = rows && rows.length ? rows[0] : null;
+  if (newest) applyLiveState(newest);
+  else if (summary && summary.strongest) applyLiveState(summary.strongest);
 }
 
 /* ---------------------------------------------------------------------
@@ -424,7 +464,7 @@ async function askAgent(question) {
 
 function setAutoRefresh() {
   if (state.autoTimer) clearInterval(state.autoTimer);
-  if (el('autoRefresh').checked) state.autoTimer = setInterval(loadData, 15000);
+  if (el('autoRefresh').checked) state.autoTimer = setInterval(loadData, 8000);
 }
 
 el('loadBtn').addEventListener('click', loadData);

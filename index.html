@@ -110,6 +110,13 @@
             <span class="readout-val" id="liveClass">IDLE</span>
             <span class="readout-key">state</span>
           </div>
+          <div class="readout-block device-alert" id="deviceAlert" data-live="false" title="Device alert outputs — the LED and buzzer on the station fire together the moment any sensor crosses its STA/LTA threshold (the same trigger that drives this trace).">
+            <span class="alert-outputs">
+              <span class="alert-led" id="ledIndicator" data-on="false" aria-label="LED">LED</span>
+              <span class="alert-buzzer" id="buzzerIndicator" data-on="false" aria-label="Buzzer">BUZ</span>
+            </span>
+            <span class="readout-key">LED / buzzer</span>
+          </div>
         </div>
       </div>
       <div class="card-body">

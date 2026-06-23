@@ -32,6 +32,12 @@ function detectedRow(label, value, unit) {
   return `<li><span class="metric-label">${label}</span><span class="metric-value">${valueHtml}</span></li>`;
 }
 
+// A short, field-engineer-oriented interpretation note shown under a panel.
+// Kept factual and tied to what the panel actually displays.
+function metricNote(html) {
+  return `<p class="metric-note">${html}</p>`;
+}
+
 function mmiRoman(mmi) {
   if (mmi === null || mmi === undefined || mmi < 0) return null;
   const numerals = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
@@ -63,6 +69,12 @@ function renderSeismicMeasurements(summary, rows) {
       ${metricRow('Distance estimate', dist, 'km')}
       ${metricRow('Validation error', verr, '%')}
     </ul>
+    ${metricNote(
+      '<strong>Engineer note:</strong> these describe the single strongest event in the ' +
+      'window. MMI&nbsp;&ge;&nbsp;V is generally the threshold for being felt indoors; PGA and ' +
+      'MMI should move together. Magnitude here is a coarse PGA/distance estimate from a demo ' +
+      'array &mdash; treat it as order-of-magnitude, and trust it more when validation error is low.'
+    )}
   `;
 }
 
@@ -79,22 +91,23 @@ function renderDetectionMetrics(summary, rows) {
   const lis = ref && Number(ref.lis3dh_stalta) >= 0 ? Number(ref.lis3dh_stalta).toFixed(2) : null;
   const mpu = ref && Number(ref.mpu6050_stalta) >= 0 ? Number(ref.mpu6050_stalta).toFixed(2) : null;
 
-  const agreement = summary && summary.sensorAgreement;
-  const agreementVal = agreement && agreement.available ? agreement.agreementScore.toFixed(0) : null;
-
-  const confidence = summary && summary.confidence;
-  const confidenceVal = confidence && confidence.score !== null && confidence.score !== undefined
-    ? confidence.score.toFixed(0) : null;
-
+  // NOTE: "Sensor agreement" and "Detection confidence" were removed here —
+  // they duplicated the dedicated Sensor-correlation and Seismic-confidence
+  // cards (which read the same summary.sensorAgreement / summary.confidence).
+  // This panel now shows only the three raw per-sensor STA/LTA ratios.
   card.innerHTML = `
     <span class="eyebrow">Detection metrics</span>
     <ul class="metric-list">
       ${metricRow('ADXL345 STA/LTA ratio', adxl, null)}
       ${metricRow('LIS3DH STA/LTA ratio', lis, null)}
       ${metricRow('MPU6050 STA/LTA ratio', mpu, null)}
-      ${metricRow('Sensor agreement', agreementVal, '%')}
-      ${metricRow('Detection confidence', confidenceVal, '%')}
     </ul>
+    ${metricNote(
+      '<strong>Engineer note:</strong> STA/LTA is the short- vs long-term energy ratio. ' +
+      '&asymp;1.0 is background noise; a trigger typically fires around 2.5&ndash;4&times;. ' +
+      'Look for all three sensors rising together &mdash; a single channel spiking alone is ' +
+      'usually a local knock or instrument noise, not ground motion.'
+    )}
   `;
 }
 
@@ -160,6 +173,12 @@ function renderTimingMetrics(summary, rows) {
       ${metricRow('Event duration', duration, 's')}
       ${metricRow('System uptime', uptime, null)}
     </ul>
+    ${metricNote(
+      '<strong>Engineer note:</strong> the P&ndash;S gap sets epicentral distance &mdash; ' +
+      'rule of thumb, distance&nbsp;(km)&nbsp;&asymp;&nbsp;(S&minus;P seconds)&nbsp;&times;&nbsp;8. ' +
+      'A clean P-then-S ordering with a positive gap is the signature of a real teleseism; ' +
+      'no gap (P or S only) means distance can&rsquo;t be resolved from this event.'
+    )}
   `;
 }
 
@@ -183,7 +202,6 @@ function renderEventStatistics(summary, rows) {
   const card = document.getElementById('eventStatisticsCard');
   if (!card) return;
 
-  const total = rows.length;
   const confirmed = rows.filter(r => r.classification === 'Confirmed Seismic Event').length;
 
   const falseTriggers = summary && Number.isFinite(summary.falseTriggerCount)
@@ -191,27 +209,32 @@ function renderEventStatistics(summary, rows) {
 
   const pgaVals = rows.map(r => Number(r.pga)).filter(v => v >= 0);
   const avgPga = pgaVals.length ? (pgaVals.reduce((a, b) => a + b, 0) / pgaVals.length).toFixed(1) : null;
-  const highPga = pgaVals.length ? Math.max(...pgaVals).toFixed(1) : null;
 
   const magVals = rows.map(r => Number(r.magnitude)).filter(v => v >= 0);
   const avgMag = magVals.length ? (magVals.reduce((a, b) => a + b, 0) / magVals.length).toFixed(1) : null;
-  const largeMag = magVals.length ? Math.max(...magVals).toFixed(1) : null;
 
   const distVals = rows.map(r => Number(r.distance_km)).filter(v => v >= 0);
   const avgDist = distVals.length ? (distVals.reduce((a, b) => a + b, 0) / distVals.length).toFixed(1) : null;
 
+  // NOTE: "Total events", "Highest PGA" and "Largest magnitude" were removed —
+  // they duplicate the Events-loaded, Peak-PGA and Max-magnitude gauges at the
+  // top of the dashboard. This panel now carries only window-level aggregates
+  // that aren't shown elsewhere.
   card.innerHTML = `
     <span class="eyebrow">Event statistics</span>
     <ul class="metric-list">
-      ${metricRow('Total events', total, null)}
       ${metricRow('Confirmed events', confirmed, null)}
       ${metricRow('False triggers', falseTriggers, null)}
       ${metricRow('Average PGA', avgPga, 'cm/s&sup2;')}
-      ${metricRow('Highest PGA', highPga, 'cm/s&sup2;')}
       ${metricRow('Average magnitude', avgMag, null)}
-      ${metricRow('Largest magnitude', largeMag, null)}
       ${metricRow('Average distance', avgDist, 'km')}
     </ul>
+    ${metricNote(
+      '<strong>Engineer note:</strong> watch the false-trigger count against confirmed ' +
+      'events &mdash; a rising ratio means thresholds are set too low. Compare these window ' +
+      'averages with the Peak-PGA / Max-magnitude gauges above to see how much a single ' +
+      'event dominates the record.'
+    )}
   `;
 }
 

@@ -761,69 +761,120 @@ def local_agent_answer(
     q = question.lower()
     if not rows:
         return (
-            "No Supabase events are loaded yet. Check your backend .env values "
-            "or record/upload events from the ESP32 first."
+            "Reading: no Supabase events are loaded yet, so there's nothing to analyse.\n"
+            "Suggestion: check the backend .env values (SUPABASE_URL / key), then run a "
+            "shaker sequence on the ESP32 so station_live starts streaming — the dashboard "
+            "will populate within a couple of refresh cycles."
         )
     strongest = summary.get("strongest") or {}
     if "strong" in q or "peak" in q or "largest" in q:
+        pga = safe_num(strongest.get("pga"), -1)
+        suggestion = (
+            "Suggestion: open the waveform/oscilloscope trace for this event and confirm a "
+            "clean P-then-S arrival before trusting the magnitude — a high PGA with no P/S "
+            "ordering is usually a local bump, not a quake."
+            if pga >= 80 else
+            "Suggestion: this is modest shaking; if you expected a bigger event, lower the "
+            "STA/LTA threshold slightly or move the simulator closer to the sensors and re-run."
+        )
         return (
-            f"The strongest event is {strongest.get('classification', 'Unknown')} with "
+            f"Reading: the strongest event is {strongest.get('classification', 'Unknown')} with "
             f"PGA {fmt_num(strongest.get('pga'), 1, ' cm/s2')}, "
             f"magnitude {fmt_num(strongest.get('magnitude'), 1)}, "
-            f"and distance {fmt_num(strongest.get('distance_km'), 1, ' km')}."
+            f"and distance {fmt_num(strongest.get('distance_km'), 1, ' km')}.\n{suggestion}"
         )
     if "validation" in q or "error" in q:
         err = summary.get("avgValidationError")
         if err is None:
             return (
-                "There are no validation error values yet. Run a simulator event "
-                "with P-wave and S-wave detection."
+                "Reading: there are no validation-error values yet (they need a P-wave AND an "
+                "S-wave to be detected on the same event).\n"
+                "Suggestion: run a full shaker sequence (send 's' over Bluetooth) so the P/S "
+                "gap is captured, then re-ask — that's what populates this field."
+            )
+        if err > 25:
+            suggestion = (
+                "Suggestion: that's above the 25% usable line — tune the motor timing and the "
+                "P/S detection thresholds, and re-check sensor mounting for slack before the "
+                "next run."
+            )
+        elif err > 15:
+            suggestion = (
+                "Suggestion: usable but not tight — a small motor-timing trim or firmer sensor "
+                "mounting should pull it under 15%."
+            )
+        else:
+            suggestion = "Suggestion: that's already excellent; keep the current setup and log more runs to confirm it's stable."
+        return f"Reading: average validation error is {err:.1f}%.\n{suggestion}"
+    if "threshold" in q or "tune" in q:
+        agreement = summary.get("sensorAgreement") or {}
+        score = agreement.get("agreementScore")
+        focus = ""
+        if isinstance(score, (int, float)):
+            focus = (
+                f" Current sensor agreement is {score:.0f}%, so the three axes are tracking "
+                "well — tune them as a group."
+                if score >= 70 else
+                f" Current sensor agreement is only {score:.0f}%, so start with whichever sensor's "
+                "ratio diverges most from the other two."
             )
         return (
-            f"Average validation error is {err:.1f}%. "
-            "Below 15% is excellent, 15-25% is usable, and above 25% needs tuning."
-        )
-    if "threshold" in q or "tune" in q:
-        return (
-            "Tune STA/LTA gradually: raise thresholds if footsteps trigger events, "
-            "lower them if the simulator is missed. Adjust one sensor at a time and "
-            "compare ADXL345, LIS3DH, and MPU6050 ratios."
+            "Reading: thresholds are adaptive (mean + k·σ of the STA/LTA ratio per sensor)." + focus + "\n"
+            "Suggestion: change one sensor at a time — raise its threshold if footsteps trigger "
+            "false events, lower it if the simulator is missed — and watch the ADXL345/LIS3DH/"
+            "MPU6050 ratios converge before touching the next."
         )
     if "agreement" in q or "agree" in q:
         agreement = summary.get("sensorAgreement") or {}
         if not agreement.get("available"):
             sample_size = agreement.get("sampleSize", 0)
             return (
-                f"Sensor agreement isn't available yet — it needs at least 3 rows with "
-                f"all three STA/LTA channels, and currently has {sample_size}. "
-                "If you're only seeing earthquake_history rows, make sure your ESP32 "
-                "firmware and Supabase schema include adxl345_stalta/lis3dh_stalta/"
-                "mpu6050_stalta on confirmed events — station_live rows carry the "
-                "equivalent *_ratio fields and *_score fields already."
+                f"Reading: sensor agreement isn't available yet — it needs at least 3 rows with "
+                f"all three STA/LTA channels and currently has {sample_size}.\n"
+                "Suggestion: if you're only seeing earthquake_history rows, confirm the v11 "
+                "firmware and schema include adxl345_stalta/lis3dh_stalta/mpu6050_stalta on "
+                "confirmed events; station_live rows already carry the *_ratio and *_score fields."
             )
         score  = agreement.get("agreementScore")
         method = agreement.get("method", "unknown")
+        suggestion = (
+            "Suggestion: agreement is high — treat a multi-sensor spike as a genuine event and "
+            "trust the merged trace."
+            if score >= 70 else
+            "Suggestion: agreement is low — check that all three sensors are mounted to the same "
+            "rigid surface and re-calibrate; divergence usually means one sensor is loose or noisy."
+        )
         return (
-            f"Sensor agreement score is {score:.0f}% "
-            f"(method: {method}, n={agreement.get('sampleSize')}) — "
-            "higher means the three sensors are tracking the same shaking pattern."
+            f"Reading: sensor agreement is {score:.0f}% "
+            f"(method: {method}, n={agreement.get('sampleSize')}) — higher means the three "
+            f"sensors are tracking the same shaking pattern.\n{suggestion}"
         )
     if "health" in q or "system" in q:
         health = system_health_score(rows)
         if health is None:
-            return "No system health data is available yet (needs station_live rows from v7 firmware)."
-        return f"System health score is {health:.0f}%."
+            return (
+                "Reading: no system-health data is available yet (needs station_live rows from "
+                "v7+ firmware).\n"
+                "Suggestion: confirm the ESP32 is uploading live frames — once it is, WiFi RSSI, "
+                "free heap, CPU load and cloud-sync rate will drive this score."
+            )
+        suggestion = (
+            "Suggestion: health is strong; no action needed beyond keeping the station powered and online."
+            if health >= 70 else
+            "Suggestion: health is low — check WiFi signal (RSSI), free heap, and cloud-sync success "
+            "rate; a weak link or heap pressure is the usual cause."
+        )
+        return f"Reading: system health score is {health:.0f}%.\n{suggestion}"
     if "summary" in q or "summarize" in q:
         return (
-            f"Loaded {summary['count']} events. "
-            f"Peak PGA is {summary['peakPga']:.1f} cm/s2, "
-            f"max magnitude is {summary['maxMagnitude']:.1f}, "
-            f"and quality score is {summary['qualityScore']:.0f}%."
+            f"Reading: loaded {summary['count']} events; peak PGA {summary['peakPga']:.1f} cm/s2, "
+            f"max magnitude {summary['maxMagnitude']:.1f}, data quality {summary['qualityScore']:.0f}%.\n"
+            f"Suggestion: {summary['suggestedAction']}"
         )
     return (
-        f"I found {summary['count']} events. Suggested action: {summary['suggestedAction']} "
-        "Ask about strongest event, validation, magnitude, PGA, sensor agreement, "
-        "system health, or threshold tuning."
+        f"Reading: I found {summary['count']} events in the current window.\n"
+        f"Suggestion: {summary['suggestedAction']} You can also ask about the strongest event, "
+        "validation error, sensor agreement, system health, or threshold tuning for a focused readout."
     )
 
 
@@ -859,11 +910,20 @@ def gemini_agent_answer(
 
     system_instruction = (
         "You are TriAxis Station Analyst, a careful seismic instrumentation assistant. "
-        "Answer only from the provided station data. Be concise, quantitative, and practical. "
+        "Answer only from the provided station data — never invent values or cite "
+        "earthquakes outside this dataset. Be concise, quantitative, and practical. "
         "Treat -1 or null on any numeric field as 'not available yet' and say so plainly — "
         "never report it as a literal negative value (e.g. never say 'magnitude is -1.0'). "
-        "If data is missing, say what is missing. "
-        "Do not claim real earthquake certainty from a school/demo sensor."
+        "If data is missing, say what is missing.\n\n"
+        "Structure EVERY reply in two short parts:\n"
+        "1. Reading — the direct, factual answer drawn from the data (numbers, what they say).\n"
+        "2. Suggestion — your own concrete, actionable recommendation that follows from that "
+        "reading: what the operator should check, tune, or watch next, grounded in the actual "
+        "values you just cited. Always give a Suggestion, even for a simple question; keep it "
+        "specific to THIS station's current data, not generic seismology advice.\n\n"
+        "Stay in context: tie the suggestion to the fields you referenced (STA/LTA ratios, "
+        "sensor agreement, validation error, system health, PGA/magnitude, sensor triggers, "
+        "shaker/simulation state). Do not claim real earthquake certainty from a school/demo sensor."
     )
     user_prompt = (
         f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
