@@ -523,7 +523,11 @@ float decayAmp = 180.0f;
 // ----------------------------------------------------------------
 //  Upload throttles (Core 1 side — just timing guards)
 // ----------------------------------------------------------------
-#define LIVE_UPLOAD_INTERVAL_MS   500
+// Lowered 500 -> 300 ms: now that the response drain no longer costs ~100 ms
+// per request, the uploader keeps up with a faster cadence comfortably, so the
+// live row in Supabase is fresher. Raise this back toward 500 if you start
+// hitting Supabase rate limits.
+#define LIVE_UPLOAD_INTERVAL_MS   300
 #define EVENT_COOLDOWN_MS        5000
 
 unsigned long lastLiveUpload       = 0;
@@ -1304,28 +1308,37 @@ static int __attribute__((optimize("Os"),noinline)) supabaseAttempt(const char* 
     else
       code = supabaseHttp.POST((uint8_t*)body, strlen(body));
 
-    // Drain the response body so the TCP receive window stays open.
-    // FIX: cap drain at 100 ms, not 500 ms. Supabase with return=minimal
-    // sends Content-Length: 0 — there are 0 bytes to drain. Blocking for
-    // up to 500 ms on an empty body was adding ~500 ms latency to EVERY
-    // upload when the available() poll returned false immediately (which it
-    // always does for an empty body — the loop never ran but millis() still
-    // ticked). Actually, stream->available() == 0 exits immediately, BUT if
-    // the response is still in-flight (slow ACK from Supabase), available()
-    // can return 0 even though bytes are coming — and we'd exit the drain
-    // early, leaving the window dirty. Real fix: wait briefly (100 ms) and
-    // drain whatever arrives, which handles both the empty-body fast path
-    // and the occasional slow ACK without the 500 ms worst case.
-    WiFiClient* stream = supabaseHttp.getStreamPtr();
-    if (stream) {
-      unsigned long drainStart = millis();
-      while (millis() - drainStart < 100) {
-        int avail = stream->available();
-        if (avail > 0) {
-          while (avail-- > 0) stream->read();
-          break;  // drained everything — done
+    // Drain the response body so the TCP receive window stays open for the
+    // next keep-alive request — but only as much as actually needs draining.
+    //
+    // SPEED FIX: the previous version spun in a 100 ms wait loop on EVERY
+    // request. With "Prefer: return=minimal", PostgREST replies with
+    // Content-Length: 0, so available() is 0 and the loop burned the full
+    // 100 ms doing nothing — adding ~100 ms of pure latency to every single
+    // upload (live, event AND waveform). Now we read the known Content-Length:
+    // if it's 0 (the normal case) we skip draining entirely; if there is a
+    // body we read exactly that many bytes with a short bounded wait. This is
+    // the single biggest win for upload throughput on the keep-alive path.
+    int contentLen = supabaseHttp.getSize();   // Content-Length, -1 if unknown
+    if (contentLen != 0) {
+      WiFiClient* stream = supabaseHttp.getStreamPtr();
+      if (stream) {
+        int remaining = contentLen;            // -1 => unknown (e.g. chunked)
+        unsigned long drainStart = millis();
+        while (millis() - drainStart < 50) {
+          int avail = stream->available();
+          if (avail > 0) {
+            while (avail-- > 0) {
+              stream->read();
+              if (remaining > 0 && --remaining == 0) break;
+            }
+            if (remaining == 0) break;         // read the whole declared body
+          } else if (remaining < 0) {
+            break;                             // unknown length, nothing pending
+          } else {
+            vTaskDelay(pdMS_TO_TICKS(2));       // yield to WiFi stack
+          }
         }
-        vTaskDelay(pdMS_TO_TICKS(5));  // yield to WiFi stack while waiting
       }
     }
 
@@ -2014,56 +2027,44 @@ void setup() {
   // ── I2C ──────────────────────────────────────────────────────
   Wire.begin(I2C_SDA, I2C_SCL);
 
-  // ── Bluetooth — guard against already-initialised controller ──
-  // On a soft-reset or watchdog reboot the BT controller may already be
-  // running. Calling esp_bt_controller_init() a second time returns
-  // ESP_ERR_INVALID_STATE and leaves the stack in an inconsistent state,
-  // which then causes BT.begin() to fail silently (the SPP socket is
-  // never opened → "Bluetooth socket failure" in Serial monitor).
-  // Fix: check status first and skip init/enable if already up.
+  // ── Bluetooth — guarantee a clean stack, then begin (PERMANENT fix) ──
   //
-  // WHY THIS STILL FAILED INTERMITTENTLY: the rev-7 guard only covered the
-  // *controller* layer. BluetoothSerial::begin() then brings up the
-  // *bluedroid* host stack and opens the SPP server socket — and bluedroid
-  // can ALSO be left INITIALIZED/ENABLED after a soft-reset, so begin()
-  // returns false and the socket is never created. The old code ignored
-  // begin()'s return value, so the failure was silent and Bluetooth motor
-  // control just didn't work until a full power cycle. We now:
-  //   1. treat ESP_ERR_INVALID_STATE on the controller as benign (already up),
-  //   2. only enable the controller when it is INITED, and
-  //   3. check BT.begin()'s return and recover with a clean end() + retry.
-  {
-    esp_bt_controller_status_t btStatus = esp_bt_controller_get_status();
-    if (btStatus == ESP_BT_CONTROLLER_STATUS_IDLE) {
-      esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-      bt_cfg.bt_max_acl_conn  = 1;
-      bt_cfg.bt_max_sync_conn = 0;
-      esp_err_t err = esp_bt_controller_init(&bt_cfg);
-      if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        Serial.print(F("BT controller init error: "));
-        Serial.println(esp_err_to_name(err));
-      }
-    }
-    // Bring the controller up in Classic mode if it is initialised but not
-    // yet enabled. INVALID_STATE here means "already enabled" → harmless.
-    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
-      esp_err_t en = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
-      if (en != ESP_OK && en != ESP_ERR_INVALID_STATE) {
-        Serial.print(F("BT controller enable error: "));
-        Serial.println(esp_err_to_name(en));
-      }
-    }
-    // ESP_BT_CONTROLLER_STATUS_ENABLED → already fully up, do nothing.
+  // ROOT CAUSE of "Bluetooth socket failure": after a soft-reset, watchdog
+  // reboot or a re-flash (anything short of a full power cycle), the BT
+  // controller and/or the bluedroid host stack are left in an INITED/ENABLED
+  // state from the previous run. BluetoothSerial::begin() then tries to
+  // (re)initialise them — esp_bluedroid_init() / esp_spp_start_srv() return
+  // ESP_ERR_INVALID_STATE — and the SPP server socket is never opened. Only a
+  // power cycle cleared it.
+  //
+  // Earlier revisions tried to *pre-init* the controller and skip if it was up.
+  // That only patched the controller layer (not bluedroid/SPP) and could itself
+  // leave a half-initialised stack. The permanent fix is the opposite: if the
+  // stack is not already IDLE, fully tear bluedroid + controller down so
+  // begin() ALWAYS starts from the same clean slate a cold boot would give it.
+  // Each teardown call is a harmless no-op (returns INVALID_STATE, ignored) for
+  // a layer that isn't currently up. Teardown order = reverse of init.
+  if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
+    Serial.println(F("BT stack not IDLE at boot (soft reset) — clean teardown..."));
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+    delay(100);
   }
 
-  // BT.begin() opens the SPP socket. If bluedroid was left in a stale state
-  // it returns false; recover with end() + a short settle + one retry rather
-  // than running blind without Bluetooth motor control.
+  // begin() now owns the full, clean initialisation from IDLE. The retry (with
+  // another full teardown) covers the rare case where the first teardown didn't
+  // fully settle before begin() ran.
   bool btOk = BT.begin("TremorLab");
   if (!btOk) {
-    Serial.println(F("BT.begin() failed (stale SPP socket?) — end + retry..."));
+    Serial.println(F("BT.begin() failed — full teardown + retry..."));
     BT.end();
-    delay(250);
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+    delay(200);
     btOk = BT.begin("TremorLab");
   }
   if (btOk) {
