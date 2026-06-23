@@ -1,21 +1,10 @@
 /* ---------------------------------------------------------------------
    metrics-panel.js
    Renders the expanded metrics panels: Seismic Measurements, Detection
-   Metrics, Waveform Metrics, Timing Metrics, Simulation Metrics,
-   Alert & Health Metrics, Event Statistics.
+   Metrics, Timing Metrics, Event Statistics.
 
-   Fields backed by real Supabase/summary data render their value.
-   Fields with no backend source yet render "Not wired yet" so nothing
-   on screen looks like real telemetry when it isn't.
-
-   This version is wired to the full supabase_schema.sql:
-     - station_waveform: adxl345/lis3dh/mpu6050/unified_samples,
-       p_wave_index, s_wave_index, surface_wave_index, peak_amplitude,
-       waveform_confidence  -> summary.waveform (from server.py fetch_waveform)
-     - station_live: simulation_phase, motor_pwm_level,
-       simulation_progress, cpu_load_pct, cloud_sync_success_pct,
-       battery_voltage
-     - earthquake_history: event_duration_ms, is_false_trigger
+   Removed panels: Waveform Metrics, Simulation Metrics, Alert & Health
+   Metrics (cards removed from index.html accordingly).
 
    Depends on global `el()` and `fmt()` from app.js (loaded first).
 --------------------------------------------------------------------- */
@@ -106,148 +95,6 @@ function renderDetectionMetrics(summary, rows) {
 }
 
 /* ---------------------------------------------------------------------
-   Waveform Metrics
-   Wired to summary.waveform, populated by server.py's fetch_waveform()
-   from station_waveform for the strongest earthquake_history event.
-
-   States handled:
-     1. summary.waveform is null + source is station_live
-        → ESP32 doesn't write waveforms for live rows; explain this.
-     2. summary.waveform is null + source is earthquake_history (or unknown)
-        → waveform row doesn't exist yet for this event_id.
-     3. summary.waveform exists but hasUsableData is false
-        → row exists but all columns are null/empty (schema applied but
-          ESP32 not yet sending raw samples).
-     4. summary.waveform exists and hasUsableData is true
-        → render everything we have; use NOT_DETECTED (not NOT_WIRED)
-          for individual fields that are null — they're wired, just absent.
-
-   Division-by-zero guard: sampleRateHz is null (not 0) when unknown,
-   so indexToSeconds returns null rather than Infinity.
---------------------------------------------------------------------- */
-
-function renderWaveformMetrics(summary) {
-  const card = document.getElementById('waveformMetricsCard');
-  if (!card) return;
-
-  const wf = summary && summary.waveform;
-  const strongest = summary && summary.strongest;
-  const strongestSource = strongest && strongest.source;
-
-  // ── State 1: live-station row — waveform lookup not applicable ──
-  if (!wf && strongestSource === 'station_live') {
-    card.innerHTML = `
-      <span class="eyebrow">Waveform metrics</span>
-      <p class="widget-empty">
-        Waveform data is only stored for confirmed earthquake_history events.
-        The current strongest row is from station_live (no persistent event_id).
-        Once the ESP32 logs a confirmed event to earthquake_history and writes
-        raw samples to station_waveform with a matching event_id, this card
-        will populate automatically.
-      </p>
-    `;
-    return;
-  }
-
-  // ── State 2: history row but no waveform row in Supabase yet ──
-  if (!wf) {
-    const eventId = strongest && strongest.event_id ? strongest.event_id : null;
-    card.innerHTML = `
-      <span class="eyebrow">Waveform metrics</span>
-      <p class="widget-empty">
-        No station_waveform row found${eventId ? ` for event&nbsp;<code>${eventId}</code>` : ''}.
-        Have the ESP32 INSERT a row into station_waveform with
-        <code>event_id = '${eventId || '&lt;event_id&gt;'}'</code>
-        and the raw adxl345_samples / lis3dh_samples / mpu6050_samples arrays
-        to populate this card.
-      </p>
-    `;
-    return;
-  }
-
-  // ── State 3: row exists but no usable data columns filled in yet ──
-  if (!wf.hasUsableData) {
-    card.innerHTML = `
-      <span class="eyebrow">Waveform metrics</span>
-      <p class="widget-empty">
-        A station_waveform row exists for this event but all sample arrays and
-        wave-marker columns are empty. The schema is applied — update the ESP32
-        firmware to write adxl345_samples, lis3dh_samples, mpu6050_samples (as
-        JSON arrays), p_wave_index, s_wave_index, and sample_rate_hz to fill
-        this card.
-      </p>
-    `;
-    return;
-  }
-
-  // ── State 4: real data present — render it ──
-
-  const sampleRateHz = wf.sampleRateHz; // null if unknown/zero, never 0
-
-  // Convert a sample index to seconds. Returns null (→ NOT_DETECTED) if:
-  //   - index is null (wave not detected this event)
-  //   - sampleRateHz is null/zero (rate not recorded)
-  function indexToSeconds(idx) {
-    if (idx === null || idx === undefined) return null;
-    if (!sampleRateHz || sampleRateHz <= 0) return null;
-    const secs = idx / sampleRateHz;
-    // Extra sanity guard: Infinity or NaN means something went wrong
-    if (!isFinite(secs)) return null;
-    return secs.toFixed(2);
-  }
-
-  function channelStatus(samples) {
-    if (Array.isArray(samples) && samples.length > 0) {
-      return `${samples.length}\u202fsamples`;
-    }
-    return null; // renders as NOT_DETECTED (channel wired but empty this event)
-  }
-
-  const sampleRateDisplay = sampleRateHz ? Number(sampleRateHz).toFixed(0) : null;
-
-  const pSec = indexToSeconds(wf.pWaveIndex);
-  const sSec = indexToSeconds(wf.sWaveIndex);
-  const surfaceSec = indexToSeconds(wf.surfaceWaveIndex);
-
-  // P–S gap: only meaningful when both are present AND sample rate is known
-  let gap = null;
-  if (pSec !== null && sSec !== null) {
-    const gapVal = Number(sSec) - Number(pSec);
-    gap = isFinite(gapVal) ? gapVal.toFixed(2) : null;
-  }
-
-  const peakAmp = wf.peakAmplitude !== null && wf.peakAmplitude !== undefined && wf.peakAmplitude >= 0
-    ? Number(wf.peakAmplitude).toFixed(2) : null;
-  const wfConf = wf.waveformConfidence !== null && wf.waveformConfidence !== undefined && wf.waveformConfidence >= 0
-    ? Number(wf.waveformConfidence).toFixed(0) : null;
-
-  // If sampleRate is missing we can still show markers as raw indices
-  function indexDisplay(idx) {
-    if (idx === null || idx === undefined) return null;
-    if (!sampleRateHz) return `sample\u202f#${idx}`;
-    return indexToSeconds(idx); // already a string or null
-  }
-  const indexUnit = sampleRateHz ? 's' : null;
-
-  card.innerHTML = `
-    <span class="eyebrow">Waveform metrics</span>
-    <ul class="metric-list">
-      ${metricRow('Sample rate', sampleRateDisplay, 'Hz')}
-      ${detectedRow('ADXL345 waveform', channelStatus(wf.adxl345Samples), null)}
-      ${detectedRow('LIS3DH waveform', channelStatus(wf.lis3dhSamples), null)}
-      ${detectedRow('MPU6050 waveform', channelStatus(wf.mpu6050Samples), null)}
-      ${detectedRow('Unified seismic waveform', channelStatus(wf.unifiedSamples), null)}
-      ${detectedRow('P-wave marker', indexDisplay(wf.pWaveIndex), indexUnit)}
-      ${detectedRow('S-wave marker', indexDisplay(wf.sWaveIndex), indexUnit)}
-      ${detectedRow('Surface wave marker', indexDisplay(wf.surfaceWaveIndex), indexUnit)}
-      ${detectedRow('Peak amplitude', peakAmp, null)}
-      ${detectedRow('P&ndash;S gap', gap, sampleRateHz ? 's' : null)}
-      ${detectedRow('Waveform confidence', wfConf, '%')}
-    </ul>
-  `;
-}
-
-/* ---------------------------------------------------------------------
    Timing Metrics
    P/S arrival come from the strongest row's p_wave_ms/s_wave_ms.
    Event duration now wired to earthquake_history.event_duration_ms
@@ -276,7 +123,7 @@ function renderTimingMetrics(summary, rows) {
     ? (durationMs / 1000).toFixed(2) : null;
 
   const uptimeMs = ref ? Number(ref.system_uptime_ms) : null;
-  const hasUptime = uptimeMs !== null && !Number.isNaN(uptimeMs) && uptimeMs >= 0;
+  const hasUptime = uptimeMs !== null && !Number.isNaN(uptimeMs) && uptimeMs > 0;
   const uptime = hasUptime ? formatHms(uptimeMs) : null;
 
   card.innerHTML = `
@@ -314,12 +161,10 @@ function renderSimulationMetrics(rows) {
   if (!card) return;
   const liveRef = rows.find(r => r.source === 'station_live') || null;
 
-  const phase = liveRef && liveRef.simulation_phase != null ? liveRef.simulation_phase : null;
-  const pwmRaw = liveRef ? Number(liveRef.motor_pwm_level) : NaN;
-  const pwm = !Number.isNaN(pwmRaw) && pwmRaw >= 0 ? pwmRaw : null;
-  const progressRaw = liveRef ? Number(liveRef.simulation_progress) : NaN;
-  const progress = !Number.isNaN(progressRaw) && progressRaw >= 0
-    ? progressRaw.toFixed(0) : null;
+  const phase = liveRef && liveRef.simulation_phase ? liveRef.simulation_phase : null;
+  const pwm = liveRef && Number(liveRef.motor_pwm_level) >= 0 ? Number(liveRef.motor_pwm_level) : null;
+  const progress = liveRef && Number(liveRef.simulation_progress) >= 0
+    ? Number(liveRef.simulation_progress).toFixed(0) : null;
 
   card.innerHTML = `
     <span class="eyebrow">Simulation metrics</span>
@@ -342,16 +187,10 @@ function renderHealthMetrics(rows) {
   if (!card) return;
   const liveRef = rows.find(r => r.source === 'station_live') || null;
 
-  // wifi_rssi: valid readings are negative dBm (e.g. -60). DB default is 0,
-  // which is not a real reading. Treat 0 and anything > 0 as missing.
-  const rssiRaw = liveRef ? Number(liveRef.wifi_rssi) : NaN;
-  const rssi = !Number.isNaN(rssiRaw) && rssiRaw < 0 ? rssiRaw : null;
-
-  // free_heap: valid when > 0 (DB default 0 = not populated yet).
-  const heapRaw = liveRef ? Number(liveRef.free_heap) : NaN;
-  const heap = !Number.isNaN(heapRaw) && heapRaw > 0
-    ? (heapRaw / 1024).toFixed(1) : null;
-
+  const rssi = liveRef && liveRef.wifi_rssi !== undefined && liveRef.wifi_rssi !== null
+    ? Number(liveRef.wifi_rssi) : null;
+  const heap = liveRef && liveRef.free_heap !== undefined && liveRef.free_heap !== null
+    ? (Number(liveRef.free_heap) / 1024).toFixed(1) : null;
   const cpuLoad = liveRef && Number(liveRef.cpu_load_pct) >= 0
     ? Number(liveRef.cpu_load_pct).toFixed(0) : null;
   const syncRate = liveRef && Number(liveRef.cloud_sync_success_pct) >= 0
