@@ -242,9 +242,66 @@ function renderEventStatistics(summary, rows) {
    Entry point, called from app.js render()
 --------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------
+   Station / Sensor health (real: summary.health from latest live row)
+--------------------------------------------------------------------- */
+
+function healthBar(score) {
+  if (score === null || score === undefined) return '';
+  const pct = Math.max(0, Math.min(100, score));
+  return `<div class="quality-bar"><div class="quality-bar-fill" style="width:${pct}%"></div></div>`;
+}
+
+function renderStationHealth(summary) {
+  const card = document.getElementById('stationHealthCard');
+  if (!card) return;
+  const h = summary && summary.health;
+
+  if (!h || !h.available) {
+    card.innerHTML = `
+      <span class="eyebrow">Station health</span>
+      <p class="widget-empty">No live station data yet — health appears once the ESP32 is streaming to station_live.</p>
+    `;
+    return;
+  }
+
+  const num = (v, d = 0) => (v === null || v === undefined) ? null : Number(v).toFixed(d);
+  const score = h.score == null ? null : Number(h.score).toFixed(0);
+  const heapKb = h.freeHeap == null ? null : (Number(h.freeHeap) / 1024).toFixed(1);
+  const battery = h.battery == null ? 'USB power' : `${Number(h.battery).toFixed(2)} V`;
+  const scores = h.sensorScores || {};
+  const pct = v => v == null ? null : (Number(v) * 100).toFixed(0);
+
+  card.innerHTML = `
+    <span class="eyebrow">Station health</span>
+    <div class="agreement-score">
+      <span class="agreement-value">${score == null ? '—' : score + '%'}</span>
+      <span class="agreement-key">overall health</span>
+    </div>
+    ${healthBar(h.score)}
+    <ul class="metric-list">
+      ${metricRow('WiFi signal (RSSI)', num(h.wifiRssi), 'dBm')}
+      ${metricRow('Free heap', heapKb, 'KB')}
+      ${metricRow('CPU load', num(h.cpuLoad), '%')}
+      ${metricRow('Cloud sync success', num(h.cloudSync), '%')}
+      ${detectedRow('Battery', battery, null)}
+      ${metricRow('ADXL345 sensor score', pct(scores.adxl345), '%')}
+      ${metricRow('LIS3DH sensor score', pct(scores.lis3dh), '%')}
+      ${metricRow('MPU6050 sensor score', pct(scores.mpu6050), '%')}
+    </ul>
+    ${metricNote(
+      '<strong>Engineer note:</strong> RSSI better than &minus;70 dBm and CPU load ' +
+      'under ~60% keep uploads timely; sensor scores near 100% mean each axis is ' +
+      'tracking the others. A falling cloud-sync % points to WiFi or heap pressure ' +
+      'on the station, not a seismic issue.'
+    )}
+  `;
+}
+
 function renderExpandedMetrics(summary, rows) {
   renderSeismicMeasurements(summary, rows);
   renderDetectionMetrics(summary, rows);
   renderTimingMetrics(summary, rows);
   renderEventStatistics(summary, rows);
+  renderStationHealth(summary);
 }

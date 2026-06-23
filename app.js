@@ -184,47 +184,31 @@ function startAmbientDriftFallback() {
   }, 250);
 }
 
-// Polls /api/events directly (bypassing the slower analytics+summary
-// endpoint) for the most recent rows, on HELICORDER_POLL_MS — independent
-// of the dashboard's main 15s autoRefresh — and appends only genuinely
-// new merged STA/LTA samples to the live trace buffer.
+// Polls /api/live (the latest station_live row) on HELICORDER_POLL_MS,
+// independent of the slower full-dashboard refresh. This is the live, ever-
+// changing station state — so the readout label, the LED/buzzer alert and the
+// helicorder trace all update continuously instead of being pinned to a single
+// frozen history event (which is what made the title "say one type of event").
 async function pollHelicorder() {
   try {
-    const data = await fetchJson(`/api/events?${queryString({ limit: 40 })}`);
-    const rows = data.events || [];
-    if (!rows.length) return;
+    const data = await fetchJson('/api/live');
+    const row = data.live;
+    if (!row) return;
 
-    const chronological = rows.slice().reverse();
+    // Live state label + LED/buzzer alert track the real-time row every poll.
+    applyLiveState(row);
 
-    // Keep the live state + LED/buzzer alert tracking the freshest row on the
-    // fast 2 s cadence, so they update continuously instead of only on the
-    // slower full-dashboard refresh.
-    applyLiveState(chronological[chronological.length - 1]);
+    const v = mergedRatio(row);
+    if (v < 0) return;
 
-    const fresh = chronological
-      .map(r => ({ ts: r.timestamp, v: mergedRatio(r) }))
-      .filter(r => r.v >= 0);
+    const ts = row.timestamp;
+    if (ts && ts === state.lastHelicorderFetchAt) return;  // no new frame yet
 
-    if (!fresh.length) return;
-
-    const newestSeen = fresh[fresh.length - 1].ts;
-    if (newestSeen && newestSeen === state.lastHelicorderFetchAt) {
-      // No new row since the last poll — nothing to append.
-      return;
-    }
-
-    // Only append samples newer than the last one we've already drawn.
-    const toAppend = state.lastHelicorderFetchAt
-      ? fresh.filter(r => !r.ts || r.ts > state.lastHelicorderFetchAt)
-      : fresh;
-
-    if (toAppend.length) {
-      everReceivedRealSample = true;
-      const buf = state.helicorderBuffer;
-      toAppend.forEach(r => buf.push(r.v));
-      while (buf.length > HELICORDER_MAX_SAMPLES) buf.shift();
-      state.lastHelicorderFetchAt = newestSeen;
-    }
+    everReceivedRealSample = true;
+    const buf = state.helicorderBuffer;
+    buf.push(v);
+    while (buf.length > HELICORDER_MAX_SAMPLES) buf.shift();
+    state.lastHelicorderFetchAt = ts || Date.now();
   } catch (error) {
     // Connectivity hiccup on the fast poll shouldn't disturb the rest of
     // the dashboard — the slower full refresh will surface real errors.
