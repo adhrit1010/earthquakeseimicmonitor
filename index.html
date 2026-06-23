@@ -137,11 +137,13 @@
       <span class="eyebrow">Peak PGA</span>
       <div class="gauge-value" id="peakPga">&mdash;</div>
       <span class="gauge-unit">cm/s&sup2;</span>
+      <span class="gauge-event" id="peakPgaWhen"></span>
     </article>
     <article class="bento-card span-3" data-card-id="gauge-mag">
       <span class="eyebrow">Max magnitude</span>
       <div class="gauge-value" id="maxMag">&mdash;</div>
       <span class="gauge-unit">estimated</span>
+      <span class="gauge-event" id="maxMagWhen"></span>
     </article>
     <article class="bento-card span-3" data-card-id="gauge-quality">
       <span class="eyebrow">Data quality</span>
@@ -189,6 +191,29 @@
       <div class="card-title"><h2>Classification frequency</h2></div>
       <div class="card-body">
         <canvas id="classChart"></canvas>
+      </div>
+    </article>
+
+    <!-- EVENT WAVEFORM (replaces oscilloscope view) -->
+    <article class="bento-card span-12" data-card-id="waveform-chart">
+      <div class="card-title">
+        <div>
+          <span class="eyebrow">Event waveform</span>
+          <h2>Captured seismic waveform &mdash; strongest event</h2>
+        </div>
+        <div class="helicorder-readout">
+          <div class="readout-block">
+            <span class="readout-val" id="waveformPeak">&minus;&minus;</span>
+            <span class="readout-key">peak amp</span>
+          </div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="waveform-legend" id="waveformLegend"></div>
+        <div class="waveform-canvas-wrap">
+          <canvas id="waveformChart"></canvas>
+        </div>
+        <p class="widget-empty" id="waveformEmpty">Waiting for a captured event waveform&hellip;</p>
       </div>
     </article>
 

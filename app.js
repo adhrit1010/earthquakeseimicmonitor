@@ -19,12 +19,16 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// Pull well beyond the old 500-row ceiling. The backend pages past the
+// PostgREST per-request cap, so this can exceed 1000 too.
+const EVENT_LIMIT = 2000;
+
 function filters() {
   return {
     from: el('dateFrom').value,
     to: el('dateTo').value,
     classification: el('classification').value,
-    limit: 500,
+    limit: EVENT_LIMIT,
   };
 }
 
@@ -362,20 +366,141 @@ function classCellClass(cls) {
   return '';
 }
 
-function renderTable(rows) {
-  el('rows').innerHTML = rows.length ? rows.map(r => `
-    <tr>
+// Identify a row as "the" peak-PGA / max-magnitude event. Match on event_id
+// when present, else fall back to timestamp (live rows have no event_id).
+function isSameEvent(row, ref) {
+  if (!row || !ref) return false;
+  if (ref.event_id && row.event_id) return row.event_id === ref.event_id;
+  return !!row.timestamp && row.timestamp === ref.timestamp;
+}
+
+function renderTable(rows, summary) {
+  const peakRef = summary && summary.peakPgaEvent;
+  const magRef = summary && summary.maxMagnitudeEvent;
+  el('rows').innerHTML = rows.length ? rows.map(r => {
+    const isPeakPga = isSameEvent(r, peakRef);
+    const isMaxMag = isSameEvent(r, magRef);
+    const rowCls = [isPeakPga ? 'row-peak-pga' : '', isMaxMag ? 'row-max-mag' : ''].filter(Boolean).join(' ');
+    const pgaBadge = isPeakPga ? ' <span class="peak-badge peak-badge--pga" title="Highest PGA in this window">MAX PGA</span>' : '';
+    const magBadge = isMaxMag ? ' <span class="peak-badge peak-badge--mag" title="Largest magnitude in this window">MAX MAG</span>' : '';
+    return `
+    <tr class="${rowCls}">
       <td>${new Date(r.timestamp).toLocaleString()}</td>
       <td class="${classCellClass(r.classification)}">${escapeHtml(r.classification || '\u2014')}</td>
-      <td>${fmt(r.pga, 1)}</td>
+      <td>${fmt(r.pga, 1)}${pgaBadge}</td>
       <td>${fmt(r.mmi, 1)}</td>
       <td>${fmt(r.distance_km, 1)}</td>
-      <td>${fmt(r.magnitude, 1)}</td>
+      <td>${fmt(r.magnitude, 1)}${magBadge}</td>
       <td>${fmt(r.adxl345_stalta, 2)}</td>
       <td>${fmt(r.lis3dh_stalta, 2)}</td>
       <td>${fmt(r.mpu6050_stalta, 2)}</td>
       <td>${fmt(r.validation_error, 1)}</td>
-    </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No matching events</td></tr>';
+    </tr>`;
+  }).join('') : '<tr><td colspan="10" class="empty-state">No matching events</td></tr>';
+}
+
+// When the peak-PGA / max-magnitude events happened (shown under the gauges).
+function setGaugeEventTimes(summary) {
+  const fmtWhen = ref => (ref && ref.timestamp)
+    ? `${new Date(ref.timestamp).toLocaleString()}` : '';
+  el('peakPgaWhen').textContent = fmtWhen(summary && summary.peakPgaEvent);
+  el('maxMagWhen').textContent = fmtWhen(summary && summary.maxMagnitudeEvent);
+}
+
+/* ---------------------------------------------------------------------
+   Event waveform chart \u2014 plots the captured per-sensor samples for the
+   strongest event (summary.waveform), with P/S arrival markers. This is
+   the on-dashboard replacement for the serial oscilloscope view.
+--------------------------------------------------------------------- */
+
+function drawWaveform(waveform) {
+  const canvas = el('waveformChart');
+  const empty = el('waveformEmpty');
+  const legend = el('waveformLegend');
+  if (!canvas) return;
+
+  const series = waveform ? [
+    { key: 'adxl345Samples', label: 'ADXL345', color: '#ffcf40' },
+    { key: 'lis3dhSamples', label: 'LIS3DH', color: '#58d5ff' },
+    { key: 'mpu6050Samples', label: 'MPU6050', color: '#c084fc' },
+  ].filter(s => Array.isArray(waveform[s.key]) && waveform[s.key].length > 1) : [];
+
+  const hasData = !!waveform && series.length > 0;
+  canvas.hidden = !hasData;
+  empty.hidden = hasData;
+  el('waveformPeak').textContent = waveform && Number(waveform.peakAmplitude) >= 0
+    ? Number(waveform.peakAmplitude).toFixed(3) : '\u2014';
+
+  if (!hasData) {
+    legend.innerHTML = '';
+    if (waveform && waveform.hasUsableData === false) {
+      empty.textContent = 'Strongest event has a waveform row, but no raw samples were uploaded for it yet.';
+    } else {
+      empty.textContent = 'Waiting for a captured event waveform\u2026';
+    }
+    return;
+  }
+
+  legend.innerHTML = series.map(s =>
+    `<span class="wf-key"><span class="wf-swatch" style="background:${s.color}"></span>${s.label}</span>`
+  ).join('') +
+    `<span class="wf-key"><span class="wf-swatch wf-swatch--p"></span>P-wave</span>` +
+    `<span class="wf-key"><span class="wf-swatch wf-swatch--s"></span>S-wave</span>`;
+
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width === 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+
+  const n = Math.max(...series.map(s => waveform[s.key].length));
+  let max = 0;
+  series.forEach(s => waveform[s.key].forEach(v => { max = Math.max(max, Math.abs(Number(v) || 0)); }));
+  max = Math.max(max, 0.001);
+  const mid = rect.height / 2;
+  const scale = (rect.height * 0.42) / max;
+
+  // baseline
+  ctx.strokeStyle = 'rgba(232,228,216,0.08)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, mid);
+  ctx.lineTo(rect.width, mid);
+  ctx.stroke();
+
+  // P / S markers
+  const marker = (idx, color) => {
+    if (idx === null || idx === undefined || idx < 0 || n < 2) return;
+    const x = (idx / (n - 1)) * rect.width;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, 6);
+    ctx.lineTo(x, rect.height - 6);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  marker(waveform.pWaveIndex, 'rgba(95,184,138,0.9)');
+  marker(waveform.sWaveIndex, 'rgba(214,102,74,0.95)');
+
+  // sensor traces
+  series.forEach(s => {
+    const arr = waveform[s.key];
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    arr.forEach((v, i) => {
+      const x = (i / (arr.length - 1)) * rect.width;
+      const y = mid - (Number(v) || 0) * scale;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  });
 }
 
 function render(data) {
@@ -390,7 +515,8 @@ function render(data) {
   el('quality').textContent = summary.qualityScore == null ? '\u2014' : `${fmt(summary.qualityScore, 0)}%`;
   el('action').textContent = summary.suggestedAction || '\u2014';
   el('qualityFill').style.width = summary.qualityScore == null ? '0%' : `${Math.max(0, Math.min(100, summary.qualityScore))}%`;
-  renderTable(rows);
+  renderTable(rows, summary);
+  setGaugeEventTimes(summary);
 
   const chronological = rows.slice().reverse();
   drawLine('pgaChart', chronological, 'pga', '#58d5ff');
@@ -398,6 +524,7 @@ function render(data) {
   drawLine('distChart', chronological, 'distance_km', '#c084fc');
   drawClassChart(rows);
   drawStalta(chronological);
+  drawWaveform(summary.waveform);
 
   if (!state.helicorderRaf) {
     seedHelicorder(rows);

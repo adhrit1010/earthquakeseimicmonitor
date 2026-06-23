@@ -28,7 +28,8 @@
    cards (span-12) — give them a bit more vertical room so the trace
    doesn't look squashed relative to its width. */
 [data-card-id="helicorder"] .card-body canvas,
-[data-card-id="stalta-chart"] .card-body canvas {
+[data-card-id="stalta-chart"] .card-body canvas,
+[data-card-id="waveform-chart"] .card-body canvas {
   height: 240px;
 }
 

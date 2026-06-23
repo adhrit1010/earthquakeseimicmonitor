@@ -379,6 +379,7 @@ def system_health_score(rows: list[dict[str, Any]]) -> float | None:
 def seismic_confidence(
     rows: list[dict[str, Any]],
     agreement: dict[str, Any],
+    health_score: float | None = None,
 ) -> dict[str, Any]:
     """
     Compute the "Seismic Condition" score (0-100%).
@@ -391,11 +392,16 @@ def seismic_confidence(
     heap, CPU, cloud sync). Sensor agreement and wave quality are added
     when event data is present. This gives 85-100% on a healthy idle
     station and rises/falls with actual signal quality during events.
+
+    health_score may be supplied by the caller (computed from live station
+    rows) so confidence still works while the event view shows history rows
+    that carry no health fields; if omitted it's derived from `rows`.
     """
     if not rows:
         return {"score": None, "label": None, "components": None}
 
-    health_score = system_health_score(rows)
+    if health_score is None:
+        health_score = system_health_score(rows)
 
     wave_scores = [wave_quality_score(r) for r in rows]
     wave_scores = [w for w in wave_scores if w >= 0]
@@ -535,11 +541,32 @@ def normalize_live_station(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_events_query(params: dict[str, list[str]], time_column: str) -> str:
+# PostgREST/Supabase caps a single response (default max-rows ~1000), so to
+# serve more than 500 — or more than 1000 — events we page with limit+offset.
+PAGE_SIZE = 1000
+MAX_ROWS_HARD_CAP = 20000
+
+
+def requested_limit(params: dict[str, list[str]], default: int = 500) -> int:
+    """How many rows the caller wants, clamped to a sane hard cap."""
+    try:
+        want = int(params.get("limit", [str(default)])[0])
+    except (ValueError, TypeError, IndexError):
+        want = default
+    return max(1, min(want, MAX_ROWS_HARD_CAP))
+
+
+def build_events_query(
+    params: dict[str, list[str]],
+    time_column: str,
+    limit: int,
+    offset: int = 0,
+) -> str:
     query: dict[str, str] = {
         "select": "*",
         "order": f"{time_column}.desc",
-        "limit": params.get("limit", ["500"])[0],
+        "limit": str(limit),
+        "offset": str(offset),
     }
     classification = params.get("classification", [""])[0].strip()
     date_from = params.get("from", [""])[0].strip()
@@ -560,27 +587,57 @@ def build_events_query(params: dict[str, list[str]], time_column: str) -> str:
     return urlencode(query)
 
 
+def fetch_table_rows(
+    table: str,
+    time_column: str,
+    params: dict[str, list[str]],
+    max_rows: int,
+) -> list[dict[str, Any]]:
+    """Fetch up to max_rows from a table, paging past the PostgREST row cap."""
+    headers = supabase_headers()
+    collected: list[dict[str, Any]] = []
+    offset = 0
+    while len(collected) < max_rows:
+        want = min(PAGE_SIZE, max_rows - len(collected))
+        url = (
+            f"{SUPABASE_URL}/rest/v1/{table}"
+            f"?{build_events_query(params, time_column, want, offset)}"
+        )
+        batch = http_json(url, headers)
+        if not isinstance(batch, list) or not batch:
+            break
+        collected.extend(batch)
+        if len(batch) < want:
+            break  # last page
+        offset += len(batch)
+    return collected
+
+
 def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, Any]]:
     params = params or {}
-    headers = supabase_headers()
-    history_url = (
-        f"{SUPABASE_URL}/rest/v1/earthquake_history"
-        f"?{build_events_query(params, 'created_at')}"
-    )
-    history = http_json(history_url, headers)
-    if isinstance(history, list) and history:
+    max_rows = requested_limit(params)
+
+    history = fetch_table_rows("earthquake_history", "created_at", params, max_rows)
+    if history:
         return [normalize_history_event(row) for row in history]
 
-    live_params = dict(params)
-    live_params["limit"] = ["50"]
-    live_url = (
-        f"{SUPABASE_URL}/rest/v1/station_live"
-        f"?{build_events_query(live_params, 'updated_at')}"
-    )
-    live = http_json(live_url, headers)
-    if isinstance(live, list):
-        return [normalize_live_station(row) for row in live]
-    return []
+    live = fetch_table_rows("station_live", "updated_at", params, min(max_rows, 50))
+    return [normalize_live_station(row) for row in live]
+
+
+def fetch_live_rows(max_rows: int = 5) -> list[dict[str, Any]]:
+    """
+    Fetch the most recent station_live rows regardless of what the event view
+    is showing. Used so the System-health / Sensor-agreement / Seismic-
+    confidence cards keep working even when the dashboard is displaying
+    earthquake_history events (which carry no health or *_score fields).
+    Returns [] silently if Supabase isn't configured or the table is empty.
+    """
+    try:
+        rows = fetch_table_rows("station_live", "updated_at", {}, max_rows)
+    except Exception:
+        return []
+    return [normalize_live_station(row) for row in rows]
 
 
 def fetch_waveform(event_id: Any, source: str = "earthquake_history") -> dict[str, Any] | None:
@@ -659,19 +716,48 @@ def fetch_waveform(event_id: Any, source: str = "earthquake_history") -> dict[st
     }
 
 
-def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _event_ref(row: dict[str, Any]) -> dict[str, Any]:
+    """Compact descriptor the frontend uses to flag the peak-PGA / max-mag rows."""
+    return {
+        "timestamp": row.get("timestamp"),
+        "classification": row.get("classification"),
+        "pga": safe_num(row.get("pga")),
+        "magnitude": safe_num(row.get("magnitude")),
+        "event_id": row.get("event_id"),
+    }
+
+
+def summarize_events(
+    rows: list[dict[str, Any]],
+    live_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    # System health and the score-based sensor-agreement fast path live on
+    # station_live rows. When the event view is showing earthquake_history
+    # (which has neither), fall back to the freshly-fetched live rows so the
+    # Data-quality, Sensor-correlation and Seismic-confidence cards keep
+    # working instead of collapsing to "no data".
+    health_rows = live_rows if live_rows else rows
+    agreement_rows = live_rows if live_rows else rows
+    health = system_health_score(health_rows)
+
     if not rows:
+        agreement = sensor_agreement(agreement_rows)
         return {
             "count": 0,
             "peakPga": None,
             "maxMagnitude": None,
+            "peakPgaEvent": None,
+            "maxMagnitudeEvent": None,
             "avgValidationError": None,
             "classCounts": {},
             "strongest": None,
-            "qualityScore": None,
+            # If the station is streaming live (health available) but no events
+            # are logged yet, surface the live health as the quality score
+            # rather than a blank.
+            "qualityScore": health,
             "suggestedAction": "Load or record seismic events first.",
-            "sensorAgreement": sensor_agreement(rows),
-            "confidence": seismic_confidence(rows, sensor_agreement(rows)),
+            "sensorAgreement": agreement,
+            "confidence": seismic_confidence(health_rows, agreement, health),
             "severity": severity_from_pga(-1, -1),
             "falseTriggerCount": 0,
             "waveform": None,
@@ -682,8 +768,10 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         cls = str(row.get("classification") or "Unknown")
         class_counts[cls] = class_counts.get(cls, 0) + 1
 
-    peak_pga = max(safe_num(r.get("pga")) for r in rows)
-    max_mag  = max(safe_num(r.get("magnitude")) for r in rows)
+    peak_pga_row = max(rows, key=lambda r: safe_num(r.get("pga")))
+    max_mag_row  = max(rows, key=lambda r: safe_num(r.get("magnitude")))
+    peak_pga = safe_num(peak_pga_row.get("pga"))
+    max_mag  = safe_num(max_mag_row.get("magnitude"))
     errors   = [safe_num(r.get("validation_error")) for r in rows if safe_num(r.get("validation_error")) >= 0]
     avg_error = sum(errors) / len(errors) if errors else None
     false_trigger_count = sum(1 for r in rows if r.get("is_false_trigger") is True)
@@ -703,7 +791,6 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         quality -= 5
 
     # System health bonus: pulls quality toward 100 when health is high.
-    health = system_health_score(rows)
     if health is not None:
         # Add up to +15 pts from health (at health=100 → +15, health=0 → 0)
         quality += (health / 100.0) * 15.0
@@ -717,7 +804,7 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         )
     elif peak_pga > 350:
         action = (
-            "Strong shaking detected. Review oscilloscope trace and verify "
+            "Strong shaking detected. Review the event waveform card and verify "
             "the event was simulated or real."
         )
     elif class_counts.get("Confirmed Seismic Event", 0) == 0:
@@ -728,8 +815,8 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     else:
         action = "Data is consistent for demonstration. Continue collecting test runs."
 
-    agreement  = sensor_agreement(rows)
-    confidence = seismic_confidence(rows, agreement)
+    agreement  = sensor_agreement(agreement_rows)
+    confidence = seismic_confidence(rows, agreement, health)
     severity   = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
 
     strongest_source   = strongest.get("source", "")
@@ -740,6 +827,8 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "count": len(rows),
         "peakPga": peak_pga,
         "maxMagnitude": max_mag,
+        "peakPgaEvent": _event_ref(peak_pga_row),
+        "maxMagnitudeEvent": _event_ref(max_mag_row),
         "avgValidationError": avg_error,
         "classCounts": class_counts,
         "strongest": strongest,
@@ -972,7 +1061,8 @@ def get_events(query_params: dict[str, list[str]]) -> dict[str, Any]:
 
 def get_analytics(query_params: dict[str, list[str]]) -> dict[str, Any]:
     rows = fetch_events(query_params)
-    return {"summary": summarize_events(rows), "events": rows}
+    live = fetch_live_rows()
+    return {"summary": summarize_events(rows, live), "events": rows}
 
 
 def post_agent(body: dict[str, Any]) -> dict[str, Any]:
@@ -980,7 +1070,8 @@ def post_agent(body: dict[str, Any]) -> dict[str, Any]:
     filters  = body.get("filters") if isinstance(body.get("filters"), dict) else {}
     params   = {k: [str(v)] for k, v in filters.items() if v not in (None, "")}
     rows     = fetch_events(params)
-    summary  = summarize_events(rows)
+    live     = fetch_live_rows()
+    summary  = summarize_events(rows, live)
     answer   = gemini_agent_answer(question, rows, summary)
     return {"answer": answer, "summary": summary, "usedOpenAI": bool(GEMINI_API_KEY)}
 

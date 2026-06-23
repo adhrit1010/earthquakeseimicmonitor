@@ -515,6 +515,68 @@ input[type="date"]:focus, select:focus, input[type="text"]:focus, .agent-row inp
   margin-top: 6px;
 }
 
+/* ── Peak-event identification (max PGA / max magnitude) ── */
+.gauge-event {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.6rem;
+  letter-spacing: 0.02em;
+  color: var(--bone-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.peak-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.peak-badge--pga { background: rgba(88, 213, 255, 0.16); color: #58d5ff; border: 1px solid rgba(88, 213, 255, 0.4); }
+.peak-badge--mag { background: rgba(95, 184, 138, 0.16); color: #5fb88a; border: 1px solid rgba(95, 184, 138, 0.4); }
+
+tr.row-peak-pga td, tr.row-max-mag td { background: rgba(255, 207, 64, 0.05); }
+tr.row-peak-pga, tr.row-max-mag { box-shadow: inset 2px 0 0 var(--amber); }
+
+/* ── Event waveform card ── */
+.waveform-canvas-wrap {
+  max-width: 1320px;
+  margin: 4px auto 0;
+  padding: 0 24px;
+}
+
+.waveform-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 4px 24px 0;
+  max-width: 1320px;
+  margin: 0 auto;
+}
+
+.wf-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.66rem;
+  color: var(--bone-dim);
+}
+
+.wf-swatch {
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.wf-swatch--p { height: 10px; width: 0; border-left: 2px dashed #5fb88a; }
+.wf-swatch--s { height: 10px; width: 0; border-left: 2px dashed #d6664a; }
+
 .chart-card--wide canvas { height: 160px; }
 
 /* ===================== LOWER GRID: AGENT + TABLE ===================== */
