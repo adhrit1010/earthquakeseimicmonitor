@@ -4,6 +4,8 @@ const state = {
   autoTimer: null,
   helicorderBuffer: [],   // rolling buffer of recent ratio samples for the live trace
   helicorderRaf: null,
+  helicorderPollTimer: null,
+  lastHelicorderFetchAt: 0,
 };
 
 const el = id => document.getElementById(id);
@@ -50,9 +52,26 @@ function setCloud(ok, text) {
 
 /* ---------------------------------------------------------------------
    Helicorder: continuously sweeping trace, drum-recorder style.
-   Built from the merged STA/LTA ratio of the most recent rows, then
-   ambient-jittered between refreshes so the instrument always feels alive.
+
+   CHANGED FROM THE PREVIOUS VERSION:
+   Previously this only pulled in real samples opportunistically, right
+   after the full dashboard refresh (every 15s via setAutoRefresh), and
+   spent the rest of its time injecting random ambient drift on every
+   animation tick. That meant the trace was real data for a brief moment
+   once every 15 seconds and synthetic noise the rest of the time --
+   functionally disconnected from what the station was actually doing
+   in between.
+
+   Now the helicorder polls /api/events on its own short interval
+   (HELICORDER_POLL_MS, independent of the slower full-dashboard
+   autoRefresh) and pushes ONLY real merged STA/LTA samples into the
+   buffer. Ambient drift is now used ONLY before any real data has
+   arrived at all (so the trace isn't a flat dead line on first load),
+   and is removed entirely the moment real samples exist.
 --------------------------------------------------------------------- */
+
+const HELICORDER_POLL_MS = 2000; // independent of the 15s full dashboard refresh
+const HELICORDER_MAX_SAMPLES = 220;
 
 function mergedRatio(row) {
   return Math.max(
@@ -121,24 +140,91 @@ function drawHelicorder() {
   ctx.fill();
 }
 
+// Single rAF loop: just redraws + updates the readout label at a smooth
+// frame rate. It no longer invents data — new samples only enter the
+// buffer from pollHelicorder() below.
 function tickHelicorder() {
   state.helicorderRaf = true; // mark started immediately to avoid duplicate loops
-  // ambient jitter around the last known ratio so the trace always sweeps,
-  // even between data refreshes
-  const buf = state.helicorderBuffer;
-  const last = buf.length ? buf[buf.length - 1] : 0;
-  const drift = (Math.random() - 0.5) * 0.06;
-  const next = Math.max(0, last * 0.985 + drift + (Math.random() < 0.01 ? Math.random() * 0.3 : 0));
-  buf.push(next);
-  if (buf.length > 220) buf.shift();
   drawHelicorder();
 
-  const ratioOut = fmt(last, 2);
-  el('liveRatio').textContent = ratioOut;
+  const buf = state.helicorderBuffer;
+  const last = buf.length ? buf[buf.length - 1] : 0;
+  el('liveRatio').textContent = fmt(last, 2);
 
   state.helicorderRaf = requestAnimationFrame(() => {
     setTimeout(tickHelicorder, 60);
   });
+}
+
+// Ambient drift is now a one-shot fallback: it only runs before any real
+// sample has ever arrived (so a fresh page load shows a gently moving
+// line instead of a dead flat one), and stops permanently the first time
+// pollHelicorder() successfully appends a real sample.
+let everReceivedRealSample = false;
+let ambientDriftTimer = null;
+
+function startAmbientDriftFallback() {
+  if (ambientDriftTimer || everReceivedRealSample) return;
+  ambientDriftTimer = setInterval(() => {
+    if (everReceivedRealSample) {
+      clearInterval(ambientDriftTimer);
+      ambientDriftTimer = null;
+      return;
+    }
+    const buf = state.helicorderBuffer;
+    const last = buf.length ? buf[buf.length - 1] : 0;
+    const drift = (Math.random() - 0.5) * 0.04;
+    const next = Math.max(0, last * 0.99 + drift);
+    buf.push(next);
+    if (buf.length > HELICORDER_MAX_SAMPLES) buf.shift();
+  }, 250);
+}
+
+// Polls /api/events directly (bypassing the slower analytics+summary
+// endpoint) for the most recent rows, on HELICORDER_POLL_MS — independent
+// of the dashboard's main 15s autoRefresh — and appends only genuinely
+// new merged STA/LTA samples to the live trace buffer.
+async function pollHelicorder() {
+  try {
+    const data = await fetchJson(`/api/events?${queryString({ limit: 40 })}`);
+    const rows = data.events || [];
+    if (!rows.length) return;
+
+    const chronological = rows.slice().reverse();
+    const fresh = chronological
+      .map(r => ({ ts: r.timestamp, v: mergedRatio(r) }))
+      .filter(r => r.v >= 0);
+
+    if (!fresh.length) return;
+
+    const newestSeen = fresh[fresh.length - 1].ts;
+    if (newestSeen && newestSeen === state.lastHelicorderFetchAt) {
+      // No new row since the last poll — nothing to append.
+      return;
+    }
+
+    // Only append samples newer than the last one we've already drawn.
+    const toAppend = state.lastHelicorderFetchAt
+      ? fresh.filter(r => !r.ts || r.ts > state.lastHelicorderFetchAt)
+      : fresh;
+
+    if (toAppend.length) {
+      everReceivedRealSample = true;
+      const buf = state.helicorderBuffer;
+      toAppend.forEach(r => buf.push(r.v));
+      while (buf.length > HELICORDER_MAX_SAMPLES) buf.shift();
+      state.lastHelicorderFetchAt = newestSeen;
+    }
+  } catch (error) {
+    // Connectivity hiccup on the fast poll shouldn't disturb the rest of
+    // the dashboard — the slower full refresh will surface real errors.
+  }
+}
+
+function setHelicorderPolling() {
+  if (state.helicorderPollTimer) clearInterval(state.helicorderPollTimer);
+  pollHelicorder();
+  state.helicorderPollTimer = setInterval(pollHelicorder, HELICORDER_POLL_MS);
 }
 
 function updateLiveReadout(summary, rows) {
@@ -276,10 +362,8 @@ function render(data) {
   if (!state.helicorderRaf) {
     seedHelicorder(rows);
     tickHelicorder();
-  } else if (rows.length) {
-    // splice in fresh real samples so the live trace reflects real data
-    const fresh = chronological.slice(-40).map(mergedRatio).filter(v => v >= 0);
-    if (fresh.length) state.helicorderBuffer = state.helicorderBuffer.slice(0, -fresh.length).concat(fresh);
+    startAmbientDriftFallback();
+    setHelicorderPolling();
   }
   updateLiveReadout(summary, rows);
   if (typeof renderAdvancedAnalytics === 'function') renderAdvancedAnalytics(summary);
