@@ -3,8 +3,12 @@
    Renders the expanded metrics panels: Seismic Measurements, Detection
    Metrics, Timing Metrics, Event Statistics.
 
-   Removed panels: Waveform Metrics, Simulation Metrics, Alert & Health
-   Metrics (cards removed from index.html accordingly).
+   Fields backed by real Supabase/summary data render their value.
+   Fields with no backend source yet render "Not wired yet" so nothing
+   on screen looks like real telemetry when it isn't.
+
+   This version is wired to the full supabase_schema.sql:
+     - earthquake_history: event_duration_ms, is_false_trigger
 
    Depends on global `el()` and `fmt()` from app.js (loaded first).
 --------------------------------------------------------------------- */
@@ -95,6 +99,27 @@ function renderDetectionMetrics(summary, rows) {
 }
 
 /* ---------------------------------------------------------------------
+   Waveform Metrics
+   Wired to summary.waveform, populated by server.py's fetch_waveform()
+   from station_waveform for the strongest earthquake_history event.
+
+   States handled:
+     1. summary.waveform is null + source is station_live
+        → ESP32 doesn't write waveforms for live rows; explain this.
+     2. summary.waveform is null + source is earthquake_history (or unknown)
+        → waveform row doesn't exist yet for this event_id.
+     3. summary.waveform exists but hasUsableData is false
+        → row exists but all columns are null/empty (schema applied but
+          ESP32 not yet sending raw samples).
+     4. summary.waveform exists and hasUsableData is true
+        → render everything we have; use NOT_DETECTED (not NOT_WIRED)
+          for individual fields that are null — they're wired, just absent.
+
+   Division-by-zero guard: sampleRateHz is null (not 0) when unknown,
+   so indexToSeconds returns null rather than Infinity.
+--------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------
    Timing Metrics
    P/S arrival come from the strongest row's p_wave_ms/s_wave_ms.
    Event duration now wired to earthquake_history.event_duration_ms
@@ -148,69 +173,6 @@ function formatHms(ms) {
 }
 
 /* ---------------------------------------------------------------------
-   Simulation Metrics
-   Now wired to station_live.simulation_phase / motor_pwm_level /
-   simulation_progress. Only meaningful for live rows (source ===
-   'station_live') -- history rows from earthquake_history don't carry
-   simulator state, so this card always looks at the most recent live
-   row regardless of what's flagged as "strongest".
---------------------------------------------------------------------- */
-
-function renderSimulationMetrics(rows) {
-  const card = document.getElementById('simulationMetricsCard');
-  if (!card) return;
-  const liveRef = rows.find(r => r.source === 'station_live') || null;
-
-  const phase = liveRef && liveRef.simulation_phase ? liveRef.simulation_phase : null;
-  const pwm = liveRef && Number(liveRef.motor_pwm_level) >= 0 ? Number(liveRef.motor_pwm_level) : null;
-  const progress = liveRef && Number(liveRef.simulation_progress) >= 0
-    ? Number(liveRef.simulation_progress).toFixed(0) : null;
-
-  card.innerHTML = `
-    <span class="eyebrow">Simulation metrics</span>
-    <ul class="metric-list">
-      ${metricRow('Simulation phase', phase, null)}
-      ${metricRow('Motor PWM level', pwm, '0&ndash;255')}
-      ${metricRow('Simulation progress', progress, '%')}
-    </ul>
-  `;
-}
-
-/* ---------------------------------------------------------------------
-   Alert & Health Metrics
-   Now wired to station_live.cpu_load_pct, cloud_sync_success_pct,
-   battery_voltage, in addition to the existing wifi_rssi/free_heap.
---------------------------------------------------------------------- */
-
-function renderHealthMetrics(rows) {
-  const card = document.getElementById('healthMetricsCard');
-  if (!card) return;
-  const liveRef = rows.find(r => r.source === 'station_live') || null;
-
-  const rssi = liveRef && liveRef.wifi_rssi !== undefined && liveRef.wifi_rssi !== null
-    ? Number(liveRef.wifi_rssi) : null;
-  const heap = liveRef && liveRef.free_heap !== undefined && liveRef.free_heap !== null
-    ? (Number(liveRef.free_heap) / 1024).toFixed(1) : null;
-  const cpuLoad = liveRef && Number(liveRef.cpu_load_pct) >= 0
-    ? Number(liveRef.cpu_load_pct).toFixed(0) : null;
-  const syncRate = liveRef && Number(liveRef.cloud_sync_success_pct) >= 0
-    ? Number(liveRef.cloud_sync_success_pct).toFixed(0) : null;
-  const battery = liveRef && Number(liveRef.battery_voltage) >= 0
-    ? Number(liveRef.battery_voltage).toFixed(2) : null;
-
-  card.innerHTML = `
-    <span class="eyebrow">Alert &amp; health metrics</span>
-    <ul class="metric-list">
-      ${metricRow('WiFi signal strength', rssi, 'dBm')}
-      ${metricRow('ESP32 free memory', heap, 'KB')}
-      ${metricRow('CPU load', cpuLoad, '%')}
-      ${metricRow('Cloud sync success rate', syncRate, '%')}
-      ${metricRow('Battery voltage', battery, 'V')}
-    </ul>
-  `;
-}
-
-/* ---------------------------------------------------------------------
    Event Statistics
    Now wired to is_false_trigger via summary.falseTriggerCount, which
    server.py's summarize_events() computes by counting rows where
@@ -260,9 +222,6 @@ function renderEventStatistics(summary, rows) {
 function renderExpandedMetrics(summary, rows) {
   renderSeismicMeasurements(summary, rows);
   renderDetectionMetrics(summary, rows);
-  renderWaveformMetrics(summary);
   renderTimingMetrics(summary, rows);
-  renderSimulationMetrics(rows);
-  renderHealthMetrics(rows);
   renderEventStatistics(summary, rows);
 }
