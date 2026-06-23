@@ -8,7 +8,8 @@
 --  This is the full schema, including the original tables/policies
 --  plus every column needed to fully populate the dashboard's
 --  metrics cards (waveform, timing, simulation, health, false
---  triggers) instead of showing "Not wired yet".
+--  triggers, sensor correlation) instead of showing "Not wired yet"
+--  or "Sensor agreement: not available".
 --
 --  Safe to run on a fresh project, AND safe to re-run on a project
 --  that already has the original schema applied -- every statement
@@ -104,6 +105,20 @@ alter table public.earthquake_history
 -- Event statistics: false triggers
 alter table public.earthquake_history
   add column if not exists is_false_trigger boolean not null default false;
+
+-- Sensor correlation / detection metrics
+--
+-- WHY: earthquake_history previously had no STA/LTA columns at all, so
+-- once an event aged out of station_live and only existed here, the
+-- dashboard's Sensor Agreement and Detection Metrics cards always had
+-- -1/no data to work with -- "Sensor agreement: not available" was
+-- guaranteed, not just possible. The matching firmware update sends
+-- these three values (the ADXL345/LIS3DH/MPU6050 STA/LTA ratios at the
+-- moment the event was classified) on every earthquake_history insert.
+alter table public.earthquake_history
+  add column if not exists adxl345_stalta real not null default -1,
+  add column if not exists lis3dh_stalta  real not null default -1,
+  add column if not exists mpu6050_stalta real not null default -1;
 
 create index if not exists earthquake_history_station_created_idx
 on public.earthquake_history (station_id, created_at desc);
@@ -244,12 +259,16 @@ begin
 end $$;
 
 -- ================================================================
---  Done. Adding these columns lets Supabase store the data -- the
---  dashboard will still show "Not wired yet" for these fields until:
---    1. Your ESP32 firmware actually measures and sends them, and
---    2. server.py's normalize_history_event/normalize_live_station
---       are updated to read and pass them through, and
---    3. metrics-panel.js's render* functions are updated to display
---       them instead of hardcoding null.
---  Ask if you want that server.py / metrics-panel.js code too.
+--  Done. station_live, station_waveform, and earthquake_history now
+--  all carry the columns the dashboard reads, including the
+--  adxl345_stalta / lis3dh_stalta / mpu6050_stalta columns on
+--  earthquake_history that the Sensor Agreement and Detection
+--  Metrics cards need once an event ages out of station_live.
+--
+--  This schema pairs with the updated seismometer_v6.ino (sends the
+--  STA/LTA ratios on every confirmed-event upload) and server.py
+--  (reads them instead of hardcoding -1 for history rows). Without
+--  the firmware update, these three columns will simply stay at
+--  their default of -1, which is the correct "no data yet" state,
+--  not a bug.
 -- ================================================================
