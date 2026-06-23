@@ -276,7 +276,7 @@ function renderTimingMetrics(summary, rows) {
     ? (durationMs / 1000).toFixed(2) : null;
 
   const uptimeMs = ref ? Number(ref.system_uptime_ms) : null;
-  const hasUptime = uptimeMs !== null && !Number.isNaN(uptimeMs) && uptimeMs > 0;
+  const hasUptime = uptimeMs !== null && !Number.isNaN(uptimeMs) && uptimeMs >= 0;
   const uptime = hasUptime ? formatHms(uptimeMs) : null;
 
   card.innerHTML = `
@@ -314,10 +314,12 @@ function renderSimulationMetrics(rows) {
   if (!card) return;
   const liveRef = rows.find(r => r.source === 'station_live') || null;
 
-  const phase = liveRef && liveRef.simulation_phase ? liveRef.simulation_phase : null;
-  const pwm = liveRef && Number(liveRef.motor_pwm_level) >= 0 ? Number(liveRef.motor_pwm_level) : null;
-  const progress = liveRef && Number(liveRef.simulation_progress) >= 0
-    ? Number(liveRef.simulation_progress).toFixed(0) : null;
+  const phase = liveRef && liveRef.simulation_phase != null ? liveRef.simulation_phase : null;
+  const pwmRaw = liveRef ? Number(liveRef.motor_pwm_level) : NaN;
+  const pwm = !Number.isNaN(pwmRaw) && pwmRaw >= 0 ? pwmRaw : null;
+  const progressRaw = liveRef ? Number(liveRef.simulation_progress) : NaN;
+  const progress = !Number.isNaN(progressRaw) && progressRaw >= 0
+    ? progressRaw.toFixed(0) : null;
 
   card.innerHTML = `
     <span class="eyebrow">Simulation metrics</span>
@@ -340,10 +342,16 @@ function renderHealthMetrics(rows) {
   if (!card) return;
   const liveRef = rows.find(r => r.source === 'station_live') || null;
 
-  const rssi = liveRef && liveRef.wifi_rssi !== undefined && liveRef.wifi_rssi !== null
-    ? Number(liveRef.wifi_rssi) : null;
-  const heap = liveRef && liveRef.free_heap !== undefined && liveRef.free_heap !== null
-    ? (Number(liveRef.free_heap) / 1024).toFixed(1) : null;
+  // wifi_rssi: valid readings are negative dBm (e.g. -60). DB default is 0,
+  // which is not a real reading. Treat 0 and anything > 0 as missing.
+  const rssiRaw = liveRef ? Number(liveRef.wifi_rssi) : NaN;
+  const rssi = !Number.isNaN(rssiRaw) && rssiRaw < 0 ? rssiRaw : null;
+
+  // free_heap: valid when > 0 (DB default 0 = not populated yet).
+  const heapRaw = liveRef ? Number(liveRef.free_heap) : NaN;
+  const heap = !Number.isNaN(heapRaw) && heapRaw > 0
+    ? (heapRaw / 1024).toFixed(1) : null;
+
   const cpuLoad = liveRef && Number(liveRef.cpu_load_pct) >= 0
     ? Number(liveRef.cpu_load_pct).toFixed(0) : null;
   const syncRate = liveRef && Number(liveRef.cloud_sync_success_pct) >= 0
