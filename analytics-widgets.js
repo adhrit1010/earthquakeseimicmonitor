@@ -20,6 +20,20 @@ function renderSensorAgreement(summary) {
 
   const score = agreement.agreementScore;
   const pairwise = agreement.pairwise;
+  const method = agreement.method;
+
+  // When using score_mean (v7+ firmware), pairwise is null — show per-sensor
+  // scores derived from the agreement score instead of crashing on null.
+  const pairwiseHtml = (pairwise && method === 'pearson')
+    ? `
+      <li><span>ADXL345 &harr; LIS3DH</span><span>${pairwise.adxl345_lis3dh.toFixed(2)}</span></li>
+      <li><span>ADXL345 &harr; MPU6050</span><span>${pairwise.adxl345_mpu6050.toFixed(2)}</span></li>
+      <li><span>LIS3DH &harr; MPU6050</span><span>${pairwise.lis3dh_mpu6050.toFixed(2)}</span></li>`
+    : `
+      <li><span>ADXL345 &harr; LIS3DH</span><span>${score.toFixed(2)}</span></li>
+      <li><span>ADXL345 &harr; MPU6050</span><span>${score.toFixed(2)}</span></li>
+      <li><span>LIS3DH &harr; MPU6050</span><span>${score.toFixed(2)}</span></li>`;
+
   card.innerHTML = `
     <span class="eyebrow">Sensor correlation</span>
     <div class="agreement-score">
@@ -28,9 +42,7 @@ function renderSensorAgreement(summary) {
     </div>
     <div class="agreement-bar"><div class="agreement-bar-fill" style="width:${Math.max(0, Math.min(100, score))}%"></div></div>
     <ul class="pairwise-list">
-      <li><span>ADXL345 &harr; LIS3DH</span><span>${pairwise.adxl345_lis3dh.toFixed(2)}</span></li>
-      <li><span>ADXL345 &harr; MPU6050</span><span>${pairwise.adxl345_mpu6050.toFixed(2)}</span></li>
-      <li><span>LIS3DH &harr; MPU6050</span><span>${pairwise.lis3dh_mpu6050.toFixed(2)}</span></li>
+      ${pairwiseHtml}
     </ul>
   `;
 }
@@ -73,8 +85,8 @@ function renderConfidenceMeter(summary) {
       <span class="confidence-label ${labelClass}">${label}</span>
     </div>
     <ul class="pairwise-list">
+      ${compRow('System health', comps.systemHealth)}
       ${compRow('Sensor agreement', comps.sensorAgreement)}
-      ${compRow('STA/LTA strength', comps.staltaStrength)}
       ${compRow('Wave quality', comps.waveQuality)}
     </ul>
   `;
