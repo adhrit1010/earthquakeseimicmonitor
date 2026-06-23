@@ -79,6 +79,18 @@ alter table public.station_live
   add column if not exists cloud_sync_success_pct real not null default -1,
   add column if not exists battery_voltage real not null default -1;
 
+-- Sensor agreement scores (added in firmware v11 / server.py rev 7).
+-- The ESP32 sends ratio/threshold clamped to [0,1] for each sensor on
+-- every live frame. server.py computes sensor_agreement as their mean
+-- (×100) instead of the old Pearson correlation which was always ~50%
+-- on quiet data. Without these columns PostgREST silently drops the
+-- fields on every UPSERT, so server.py always sees NULL and falls back
+-- to the broken Pearson path.
+alter table public.station_live
+  add column if not exists adxl345_score real not null default -1,
+  add column if not exists lis3dh_score  real not null default -1,
+  add column if not exists mpu6050_score real not null default -1;
+
 -- ----------------------------------------------------------------
 -- EARTHQUAKE_HISTORY
 -- ----------------------------------------------------------------
@@ -265,10 +277,10 @@ end $$;
 --  earthquake_history that the Sensor Agreement and Detection
 --  Metrics cards need once an event ages out of station_live.
 --
---  This schema pairs with the updated seismometer_v6.ino (sends the
---  STA/LTA ratios on every confirmed-event upload) and server.py
---  (reads them instead of hardcoding -1 for history rows). Without
---  the firmware update, these three columns will simply stay at
---  their default of -1, which is the correct "no data yet" state,
---  not a bug.
+--  This schema pairs with seismometer_v11.ino (sends adxl345_score /
+--  lis3dh_score / mpu6050_score on every live frame, plus the STA/LTA
+--  ratios on every confirmed-event upload) and server.py rev 7
+--  (reads the score columns for sensor_agreement instead of Pearson).
+--  Without the v11 firmware, these three score columns stay at -1,
+--  which is the correct "no data yet" state, not a bug.
 -- ================================================================
