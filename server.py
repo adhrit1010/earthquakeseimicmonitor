@@ -9,6 +9,30 @@ Pure Python standard-library backend:
 - Provides a secure AI agent endpoint using Google's Gemini API
 
 No API keys are exposed to the browser.
+
+----------------------------------------------------------------------
+CHANGES IN THIS VERSION (vs. the one you had):
+
+1. normalize_history_event() now reads adxl345_stalta / lis3dh_stalta /
+   mpu6050_stalta from the earthquake_history row instead of hardcoding
+   -1 for all three. This requires:
+     - the Supabase schema patch (adds the three columns to
+       earthquake_history), and
+     - the firmware patch (seismometer_v6.ino now sends these three
+       fields on every confirmed-event upload).
+   Without both of those, these will still read as -1 (no data yet),
+   which is correct/expected, not a new bug.
+
+2. fmt_num() is a small helper used by local_agent_answer() and
+   compact_context()'s field_notes are clarified. Previously
+   local_agent_answer() did f"{safe_num(x):.1f}" directly, so any
+   field whose underlying value was the sentinel -1 (the dashboard's
+   "no data" marker) printed literally as "-1.0" in the chat answer —
+   that's the "(-1.0)" the agent was showing you for magnitude. The
+   frontend's fmt() in app.js already special-cased negative numbers
+   as "—", but the backend agent text never went through that same
+   guard. fmt_num() applies the same convention server-side.
+----------------------------------------------------------------------
 """
 
 from __future__ import annotations
@@ -148,6 +172,24 @@ def safe_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in ("true", "t", "1", "yes")
+
+
+def fmt_num(value: Any, decimals: int = 1, unit: str = "", missing: str = "not available yet") -> str:
+    """
+    Format a numeric field for human-readable agent text, treating the
+    dashboard's "-1 means no data" sentinel the same way app.js's fmt()
+    does on the frontend -- as missing, not as a literal negative value.
+
+    This is what was missing from local_agent_answer()/the Gemini prompt
+    context: those previously ran safe_num(x):.1f straight into an
+    f-string, so a not-yet-available magnitude (-1.0 internally) was
+    reported back to the user as literally "-1.0" instead of being
+    described as missing.
+    """
+    num = safe_num(value, -1.0)
+    if num < 0:
+        return missing
+    return f"{num:.{decimals}f}{unit}"
 
 
 def pearson_correlation(a: list[float], b: list[float]) -> float:
@@ -318,9 +360,16 @@ def normalize_history_event(row: dict[str, Any]) -> dict[str, Any]:
         "mmi": estimate_mmi(pga),
         "distance_km": safe_num(row.get("distance_km")),
         "magnitude": safe_num(row.get("magnitude")),
-        "adxl345_stalta": -1,
-        "lis3dh_stalta": -1,
-        "mpu6050_stalta": -1,
+        # CHANGED: previously hardcoded to -1 for every history row, which
+        # is why Sensor Agreement always showed "not available" once an
+        # event aged out of station_live and only existed in
+        # earthquake_history. Now reads the columns the firmware patch
+        # writes (adxl345_stalta/lis3dh_stalta/mpu6050_stalta) -- requires
+        # the supabase_schema_patch.sql columns to exist, otherwise these
+        # fall back to -1 exactly as before (a real "no data" case, not a bug).
+        "adxl345_stalta": safe_num(row.get("adxl345_stalta"), -1),
+        "lis3dh_stalta": safe_num(row.get("lis3dh_stalta"), -1),
+        "mpu6050_stalta": safe_num(row.get("mpu6050_stalta"), -1),
         "validation_error": confidence_to_error(row.get("confidence")),
         # Timing metrics
         "event_duration_ms": safe_int(row.get("event_duration_ms"), 0),
@@ -578,10 +627,14 @@ def local_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[
         return "No Supabase events are loaded yet. Check your backend .env values or record/upload events from the ESP32 first."
     strongest = summary.get("strongest") or {}
     if "strong" in q or "peak" in q or "largest" in q:
+        # CHANGED: uses fmt_num() instead of f"{safe_num(x):.1f}" directly,
+        # so a -1 sentinel (no data yet, e.g. magnitude before the firmware/
+        # schema patch is applied) reads as "not available yet" instead of
+        # the literal text "-1.0".
         return (
             f"The strongest event is {strongest.get('classification', 'Unknown')} with "
-            f"PGA {safe_num(strongest.get('pga')):.1f} cm/s2, magnitude {safe_num(strongest.get('magnitude')):.1f}, "
-            f"and distance {safe_num(strongest.get('distance_km')):.1f} km."
+            f"PGA {fmt_num(strongest.get('pga'), 1, ' cm/s2')}, magnitude {fmt_num(strongest.get('magnitude'), 1)}, "
+            f"and distance {fmt_num(strongest.get('distance_km'), 1, ' km')}."
         )
     if "validation" in q or "error" in q:
         err = summary.get("avgValidationError")
@@ -590,6 +643,19 @@ def local_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[
         return f"Average validation error is {err:.1f}%. Below 15% is excellent, 15-25% is usable, and above 25% needs tuning."
     if "threshold" in q or "tune" in q:
         return "Tune STA/LTA gradually: raise thresholds if footsteps trigger events, lower them if the simulator is missed. Adjust one sensor at a time and compare ADXL345, LIS3DH, and MPU6050 ratios."
+    if "agreement" in q or "agree" in q:
+        agreement = summary.get("sensorAgreement") or {}
+        if not agreement.get("available"):
+            sample_size = agreement.get("sampleSize", 0)
+            return (
+                f"Sensor agreement isn't available yet — it needs at least 3 rows with all three "
+                f"STA/LTA channels (ADXL345, LIS3DH, MPU6050) present, and currently has {sample_size}. "
+                "If you're only seeing earthquake_history rows, make sure your ESP32 firmware and "
+                "Supabase schema include adxl345_stalta/lis3dh_stalta/mpu6050_stalta on confirmed events — "
+                "station_live rows carry the equivalent *_ratio fields already."
+            )
+        score = agreement.get("agreementScore")
+        return f"Sensor agreement score is {score:.0f}% across {agreement.get('sampleSize')} overlapping samples — higher means the three sensors are tracking the same shaking pattern."
     if "summary" in q or "summarize" in q:
         return (
             f"Loaded {summary['count']} events. Peak PGA is {summary['peakPga']:.1f} cm/s2, "
@@ -597,7 +663,7 @@ def local_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[
         )
     return (
         f"I found {summary['count']} events. Suggested action: {summary['suggestedAction']} "
-        "Ask about strongest event, validation, magnitude, PGA, or threshold tuning."
+        "Ask about strongest event, validation, magnitude, PGA, sensor agreement, or threshold tuning."
     )
 
 
@@ -612,6 +678,7 @@ def compact_context(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
                 "mmi": "Modified Mercalli Intensity estimate",
                 "validation_error": "Simulator validation error percent",
                 "stalta": "Independent STA/LTA ratios from ADXL345, LIS3DH, MPU6050",
+                "sentinel": "-1 (or null) on any numeric field means 'not available yet', not a real negative value",
             },
         },
         ensure_ascii=False,
@@ -625,6 +692,8 @@ def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
     system_instruction = (
         "You are TriAxis Station Analyst, a careful seismic instrumentation assistant. "
         "Answer only from the provided station data. Be concise, quantitative, and practical. "
+        "Treat -1 or null on any numeric field as 'not available yet' and say so plainly — "
+        "never report it as a literal negative value (e.g. never say 'magnitude is -1.0'). "
         "If data is missing, say what is missing. Do not claim real earthquake certainty from a school/demo sensor."
     )
     user_prompt = f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
