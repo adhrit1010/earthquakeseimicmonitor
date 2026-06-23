@@ -241,12 +241,31 @@ const char* password = "YOUR_WIFI_PASSWORD";
 // ----------------------------------------------------------------
 #define STA_LEN       10
 #define LTA_LEN       50
-#define RATIO_THRESH  2.5f
+// Raised 2.5 -> 3.5: a real seismic arrival pushes STA/LTA well past 3x.
+// At 2.5 every door slam, footstep and air gust crossed the line. 3.5 keeps
+// genuine events while rejecting most ambient/handling noise.
+#define RATIO_THRESH  3.5f
+
+// ----------------------------------------------------------------
+//  Real-vibration gate (calibration)
+//
+//  STA/LTA is a *relative* energy measure, so even a tiny puff of air or a
+//  cable knock can momentarily spike the ratio with essentially zero ground
+//  motion. To make the buzzer/LED and the event classifier fire ONLY on real
+//  vibration we additionally require:
+//    1. the conditioned acceleration amplitude (g) to exceed MIN_VIBRATION_G, and
+//    2. that condition to hold for TRIGGER_HOLD_SAMPLES consecutive samples
+//       (~30 ms at 100 Hz), so a single-sample blip can't latch an event.
+//  Tune MIN_VIBRATION_G up if air/handling still triggers, down if real light
+//  taps are missed.
+// ----------------------------------------------------------------
+#define MIN_VIBRATION_G      0.020f
+#define TRIGGER_HOLD_SAMPLES 3
 
 // ----------------------------------------------------------------
 //  Adaptive threshold
 // ----------------------------------------------------------------
-#define ADAPT_K           3.0f
+#define ADAPT_K           4.0f
 #define ADAPT_ALPHA       0.01f
 #define ADAPT_MIN_SAMPLES 100
 
@@ -272,9 +291,20 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define WEB_WAVEFORM_SIZE   60
 
 // ----------------------------------------------------------------
-//  Heap guard — 18 KB (lowered from 26 KB: measured idle free heap ~21-22 KB)
+//  Heap guard — 14 KB (lowered from 18 KB).
+//
+//  WHY station_waveform was never populating: with idle free heap ~21-22 KB,
+//  an 18 KB guard left under ~4 KB of working room. buildWaveformJson() needs
+//  to malloc a multi-KB sample buffer AND that buffer is still held when the
+//  uploader re-checks the guard before POSTing it — so the waveform upload was
+//  mathematically guaranteed to be skipped ("Skip waveform build / heap").
+//  The heap-allocated part of a TLS upload (WiFiClientSecure read buffer +
+//  HTTPClient state) is ~6-8 KB; the TLS I/O buffers live on the upload task's
+//  12 KB stack, not the heap. A 14 KB guard still leaves >6 KB clear after a
+//  ~2.5 KB waveform buffer is held, which covers the TLS heap need with margin
+//  while finally allowing both station_live AND station_waveform to upload.
 // ----------------------------------------------------------------
-#define HEAP_GUARD 18000
+#define HEAP_GUARD 14000
 
 // ----------------------------------------------------------------
 //  Upload queue sizes
@@ -423,6 +453,9 @@ bool          sWaveDetected = false;
 // ----------------------------------------------------------------
 char          eventClass[32]    = "Normal";
 bool          quakeActive       = false;
+// Consecutive samples of real (above-floor) vibration with an over-threshold
+// STA/LTA — the debounce counter behind TRIGGER_HOLD_SAMPLES.
+int           confirmRun        = 0;
 unsigned long lastAlertTime     = 0;
 
 // ----------------------------------------------------------------
@@ -666,7 +699,9 @@ void __attribute__((optimize("Os"),noinline)) updateAdaptiveStats(float ratio, f
 float __attribute__((optimize("Os"),noinline)) getAdaptiveThreshold(float mean, float var) {
   if (adaptSampleCount < ADAPT_MIN_SAMPLES) return RATIO_THRESH;
   float thresh = mean + ADAPT_K * sqrtf(var);
-  return (thresh < 1.5f) ? 1.5f : thresh;
+  // Floor raised 1.5 -> 2.5 so the adaptive threshold can never drift down to
+  // a level where background noise alone trips a trigger.
+  return (thresh < 2.5f) ? 2.5f : thresh;
 }
 
 
@@ -812,16 +847,17 @@ void __attribute__((optimize("Os"),noinline)) motorStop() { applyMotorPwm(0); }
 #define BUZZER_REARM_MS  1200
 
 void __attribute__((optimize("Os"),noinline)) updateAlertOutputs(
-    bool adxlT, bool lisT, bool gyroT,
+    bool confirmed,
     float adxlR, float lisR, float gyroR,
     float adxlThresh, float lisThresh, float gyroThresh) {
 
-  bool triggered = adxlT || lisT || gyroT;
+  // LED + buzzer fire ONLY on a confirmed real vibration (above the amplitude
+  // floor and sustained) — never on air, handling noise or a single blip.
+  // `confirmed` is the same gate the trace trigger and classifier use, so the
+  // three stay coupled while staying honest about what's real.
+  digitalWrite(LED_PIN, confirmed ? HIGH : LOW);
 
-  // LED tracks the live trace in real time (no cooldown).
-  digitalWrite(LED_PIN, triggered ? HIGH : LOW);
-
-  if (!triggered) return;
+  if (!confirmed) return;
 
   // Audible beep, gated so it pulses rather than drones.
   if (millis() - lastAlertTime > BUZZER_REARM_MS) {
@@ -1086,6 +1122,47 @@ static void __attribute__((optimize("Os"),noinline)) printOscilloscope(
     (double)adxl_stalta, (double)lis_stalta, (double)gyro_stalta,
     pwave ? 1 : 0, swave ? 1 : 0, cls);
   Serial.print(line);
+}
+
+
+// ----------------------------------------------------------------
+//  SEISMIC WAVEFORM (serial monitor) — replaces the raw oscilloscope CSV
+//
+//  Instead of dumping 18 conditioning columns (meant for a serial plotter),
+//  this draws a live drum-recorder style trace you can read directly in the
+//  Serial Monitor: a needle that deflects with the strongest accelerometer
+//  amplitude, marked 'P' / 'S' when those arrivals are detected, with the
+//  merged STA/LTA ratio and current classification on the right. Throttled to
+//  ~20 Hz so the monitor stays legible.
+// ----------------------------------------------------------------
+static void __attribute__((optimize("Os"),noinline)) printSeismicWaveform(
+    float adxlCond, float lisCond, float gyroCond,
+    float adxlR, float lisR, float gyroR,
+    bool pwave, bool swave, const char* cls) {
+
+  static unsigned long swLine = 0;
+  if (swLine++ % 5 != 0) return;   // ~20 Hz at the 100 Hz sample rate
+
+  const int WIDTH  = 41;
+  const int CENTER = WIDTH / 2;
+
+  // Strongest ground-motion amplitude (g); full-scale deflection at ~0.2 g.
+  float amp = (adxlCond > lisCond) ? adxlCond : lisCond;
+  int dev = (int)((amp / 0.2f) * CENTER);
+  if (dev > CENTER) dev = CENTER;
+  if (dev < 0)      dev = 0;
+  int pos = CENTER + dev;
+
+  char line[WIDTH + 1];
+  for (int i = 0; i < WIDTH; i++) line[i] = (i == CENTER) ? '|' : ' ';
+  line[pos]   = swave ? 'S' : (pwave ? 'P' : '*');
+  line[WIDTH] = '\0';
+
+  float merged = adxlR;
+  if (lisR  > merged) merged = lisR;
+  if (gyroR > merged) merged = gyroR;
+
+  Serial.printf("%s  R:%5.2f  %s\n", line, (double)merged, cls);
 }
 
 
@@ -1478,10 +1555,14 @@ static void __attribute__((optimize("Os"),noinline)) buildEventJson(char* out, s
 //  Returns nullptr if heap too low.
 // ================================================================
 static char* __attribute__((optimize("Os"),noinline)) buildWaveformJson(const EventSnapshot& ev) {
-  // ~4 KB for 60 samples × 4 arrays
-  const size_t BUF = 4200;
+  // 60 samples × 4 arrays at "%.2f" ≈ 1.7 KB of JSON; 2600 gives headroom.
+  // (Was 4200 — oversized, which combined with the old 18 KB guard made the
+  // allocation impossible on the ~21 KB idle heap, so waveforms never built.)
+  const size_t BUF = 2600;
 
-  if (ESP.getFreeHeap() < (HEAP_GUARD + BUF + 4096)) {
+  // Need enough free heap to hold this buffer AND still clear the upload guard
+  // afterwards (the buffer stays allocated until the POST completes on Core 0).
+  if (ESP.getFreeHeap() < (HEAP_GUARD + BUF + 2048)) {
     Serial.printf("[UP] Skip waveform build: heap %u\n", ESP.getFreeHeap());
     return nullptr;
   }
@@ -2203,9 +2284,29 @@ void loop() {
   float lisThresh  = getAdaptiveThreshold(lisRatioMean,  lisRatioVar);
   float gyroThresh = getAdaptiveThreshold(gyroRatioMean, gyroRatioVar);
 
-  bool adxlT = adxlR > adxlThresh;
-  bool lisT  = lisR  > lisThresh;
-  bool gyroT = gyroR > gyroThresh;
+  // ── Real-vibration gate (calibration) ──────────────────────────
+  // Strongest accelerometer amplitude this sample (g). Air/handling noise
+  // sits far below MIN_VIBRATION_G even when STA/LTA momentarily spikes.
+  float peakAccelG = (adxlCond > lisCond) ? adxlCond : lisCond;
+  bool  realVibration = peakAccelG > MIN_VIBRATION_G;
+
+  bool adxlOver = adxlR > adxlThresh;
+  bool lisOver  = lisR  > lisThresh;
+  bool gyroOver = gyroR > gyroThresh;
+
+  // Require real amplitude AND an over-threshold ratio, sustained for a few
+  // samples, before anything counts as a trigger. This is what stops the
+  // buzzer/LED and classifier from latching onto air or a single-sample blip.
+  if (realVibration && (adxlOver || lisOver || gyroOver)) {
+    if (confirmRun < 1000000) confirmRun++;
+  } else {
+    confirmRun = 0;
+  }
+  bool confirmed = confirmRun >= TRIGGER_HOLD_SAMPLES;
+
+  bool adxlT = confirmed && adxlOver;
+  bool lisT  = confirmed && lisOver;
+  bool gyroT = confirmed && gyroOver;
 
   // ── FFT ────────────────────────────────────────────────────────
   fftReal[fftSampleIndex] = adxlCond;
@@ -2317,7 +2418,7 @@ void loop() {
   // Now a single helper drives BOTH outputs from the same merged trigger, so
   // trace, LED and buzzer move together; the cooldown gates only the audible
   // beep so it doesn't drone, and the beep pitch scales with severity.
-  updateAlertOutputs(adxlT, lisT, gyroT, adxlR, lisR, gyroR,
+  updateAlertOutputs(confirmed, adxlR, lisR, gyroR,
                      adxlThresh, lisThresh, gyroThresh);
 
   strncpy(eventClass, newClass, sizeof(eventClass) - 1);
@@ -2344,14 +2445,16 @@ void loop() {
     pushWebWaveform(adxlCond, gyroCond);
   }
 
-  // ── Oscilloscope Serial output ─────────────────────────────────
-  printOscilloscope(
-    adxlRawMag, adxlMed, adxlFilt, adxlCond,
-    lisRawMag,  lisMed,  lisFilt,  lisCond,
-    gyroRawMag, gyroMed, gyroFilt, gyroCond,
+  // ── Seismic waveform Serial output (replaces oscilloscope CSV) ──
+  printSeismicWaveform(
+    adxlCond, lisCond, gyroCond,
     adxlR, lisR, gyroR,
     pWaveDetected, sWaveDetected, eventClass
   );
+  (void)adxlRawMag; (void)adxlMed; (void)adxlFilt;
+  (void)lisRawMag;  (void)lisMed;  (void)lisFilt;
+  (void)gyroRawMag; (void)gyroMed; (void)gyroFilt;
+  (void)printOscilloscope;  // kept available; silence unused-function warning
 
   // ── Deferred Supabase uploads — enqueue, never block ──────────
   // Core 1 only builds the JSON and drops it in the queue.
