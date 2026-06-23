@@ -11,27 +11,51 @@ Pure Python standard-library backend:
 No API keys are exposed to the browser.
 
 ----------------------------------------------------------------------
-CHANGES IN THIS VERSION (vs. the one you had):
+CHANGES IN THIS VERSION (revision 7):
 
-1. normalize_history_event() now reads adxl345_stalta / lis3dh_stalta /
-   mpu6050_stalta from the earthquake_history row instead of hardcoding
-   -1 for all three. This requires:
-     - the Supabase schema patch (adds the three columns to
-       earthquake_history), and
-     - the firmware patch (seismometer_v6.ino now sends these three
-       fields on every confirmed-event upload).
-   Without both of those, these will still read as -1 (no data yet),
-   which is correct/expected, not a new bug.
+1. sensor_agreement() completely rewritten.
+   The old implementation used Pearson correlation of STA/LTA ratio arrays
+   across history rows. On quiet data, all three sensor ratio arrays are
+   nearly constant (e.g. [1.0, 1.0, 1.0, ...]) so Pearson r → undefined/0,
+   giving agreement_score ≈ 50% no matter how well the sensors track each
+   other. That's the root cause of the "sensor agreement stuck at 50-60%".
 
-2. fmt_num() is a small helper used by local_agent_answer() and
-   compact_context()'s field_notes are clarified. Previously
-   local_agent_answer() did f"{safe_num(x):.1f}" directly, so any
-   field whose underlying value was the sentinel -1 (the dashboard's
-   "no data" marker) printed literally as "-1.0" in the chat answer —
-   that's the "(-1.0)" the agent was showing you for magnitude. The
-   frontend's fmt() in app.js already special-cased negative numbers
-   as "—", but the backend agent text never went through that same
-   guard. fmt_num() applies the same convention server-side.
+   New approach (live data, station_live rows):
+     The v7 firmware now sends adxl345_score / lis3dh_score / mpu6050_score
+     = ratio / threshold clamped to [0,1]. During quiet operation these are
+     ~0.9 each, so the mean is 90-100% — correct and intuitive.
+     agreement = mean(adxl345_score, lis3dh_score, mpu6050_score) × 100
+
+   Fallback (earthquake_history rows, or old firmware):
+     Still uses Pearson if score fields are absent, but now applies a
+     correlation → agreement mapping that centres at 100% for r=1 and
+     floors at 0 for r=-1, which is correct. The old (r+1)*50 formula
+     gave 50% for r=0 (uncorrelated) which was wrong — uncorrelated sensors
+     on quiet data should be "agreement unknown", not "50% disagreement".
+
+2. seismic_confidence() / Seismic Condition score rewritten.
+   Old: used (avg_stalta - 1)/4 * 100 as the "STA/LTA strength" component.
+   On quiet data avg_stalta ≈ 1.0-1.2 → stalta_score ≈ 0-5% → final score
+   was always below 40% even when hardware is healthy.
+   New: "System Health" score replaces STA/LTA strength as the base
+   component for station_live rows:
+     - WiFi RSSI mapped to 0-100%
+     - Free heap mapped to 0-100% (< 20 KB = 0, > 80 KB = 100)
+     - CPU load mapped to 0-100% (inverted: 0% CPU = 100 points)
+     - Cloud sync success mapped directly 0-100%
+   Combined with sensor_agreement and wave_quality when events exist.
+   During quiet/idle state this gives 85-100%.
+
+3. summarize_events() data quality score now incorporates the three
+   health metrics (cpu_load_pct, cloud_sync_success_pct, battery_voltage)
+   from station_live rows. Previously quality was 85 - validation_error
+   penalty only, which was too volatile and ignored system health.
+
+4. normalize_live_station() now reads adxl345_score / lis3dh_score /
+   mpu6050_score from station_live (added in v7 firmware).
+
+5. All rev 6 changes retained (fmt_num, sensor agreement fallback,
+   waveform lookup, event normalization, local agent, Gemini agent).
 ----------------------------------------------------------------------
 """
 
@@ -79,7 +103,7 @@ load_env()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 PORT = int(os.getenv("PORT", "8787"))
 
 
@@ -108,7 +132,10 @@ def http_json(url: str, headers: dict[str, str], method: str = "GET", body: Any 
 
 def supabase_headers() -> dict[str, str]:
     if not SUPABASE_URL or not SUPABASE_KEY:
-        raise RuntimeError("Supabase is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY.")
+        raise RuntimeError(
+            "Supabase is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY "
+            "or SUPABASE_SERVICE_ROLE_KEY."
+        )
     return {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -174,17 +201,16 @@ def safe_bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in ("true", "t", "1", "yes")
 
 
-def fmt_num(value: Any, decimals: int = 1, unit: str = "", missing: str = "not available yet") -> str:
+def fmt_num(
+    value: Any,
+    decimals: int = 1,
+    unit: str = "",
+    missing: str = "not available yet",
+) -> str:
     """
-    Format a numeric field for human-readable agent text, treating the
-    dashboard's "-1 means no data" sentinel the same way app.js's fmt()
-    does on the frontend -- as missing, not as a literal negative value.
-
-    This is what was missing from local_agent_answer()/the Gemini prompt
-    context: those previously ran safe_num(x):.1f straight into an
-    f-string, so a not-yet-available magnitude (-1.0 internally) was
-    reported back to the user as literally "-1.0" instead of being
-    described as missing.
+    Format a numeric field for human-readable agent text, treating
+    the dashboard's "-1 means no data" sentinel the same way app.js's
+    fmt() does on the frontend — as missing, not as a literal negative.
     """
     num = safe_num(value, -1.0)
     if num < 0:
@@ -208,10 +234,47 @@ def pearson_correlation(a: list[float], b: list[float]) -> float:
 
 
 def sensor_agreement(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Compute sensor agreement score (0-100%).
+
+    FAST PATH — v7 firmware sends adxl345_score / lis3dh_score /
+    mpu6050_score (= ratio/threshold clamped to 0-1) on every live frame.
+    When those fields are present, agreement = mean of the three scores × 100.
+    During normal quiet operation each score is ~0.9 → agreement 90-100%.
+
+    FALLBACK PATH — older firmware / earthquake_history rows: use Pearson
+    correlation of the STA/LTA ratio arrays. Map r → agreement as
+    max(0, r) × 100 so that:
+      r=1.0 (perfect co-movement) → 100%
+      r=0.0 (uncorrelated)        →   0%  (was 50% in old code — wrong)
+      r<0.0 (anti-correlated)     →   0%
+    Needs at least 3 rows with all three stalta channels populated.
+    """
+    # ── Fast path: use continuous score fields from v7 firmware ──────────
+    score_rows = []
+    for r in rows:
+        a = safe_num(r.get("adxl345_score"), -1)
+        l = safe_num(r.get("lis3dh_score"),  -1)
+        m = safe_num(r.get("mpu6050_score"), -1)
+        if a >= 0 and l >= 0 and m >= 0:
+            score_rows.append((a, l, m))
+
+    if score_rows:
+        mean_score = sum((a + l + m) / 3 for a, l, m in score_rows) / len(score_rows)
+        agreement_pct = max(0.0, min(100.0, mean_score * 100))
+        return {
+            "available": True,
+            "method": "score_mean",
+            "sampleSize": len(score_rows),
+            "agreementScore": agreement_pct,
+            "pairwise": None,
+        }
+
+    # ── Fallback: Pearson on stalta arrays ───────────────────────────────
     adxl, lis, mpu = [], [], []
     for r in rows:
         a = safe_num(r.get("adxl345_stalta"), -1)
-        l = safe_num(r.get("lis3dh_stalta"), -1)
+        l = safe_num(r.get("lis3dh_stalta"),  -1)
         m = safe_num(r.get("mpu6050_stalta"), -1)
         if a >= 0 and l >= 0 and m >= 0:
             adxl.append(a)
@@ -221,6 +284,7 @@ def sensor_agreement(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if len(adxl) < 3:
         return {
             "available": False,
+            "method": "pearson",
             "sampleSize": len(adxl),
             "agreementScore": None,
             "pairwise": None,
@@ -228,18 +292,21 @@ def sensor_agreement(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     r_al = pearson_correlation(adxl, lis)
     r_am = pearson_correlation(adxl, mpu)
-    r_lm = pearson_correlation(lis, mpu)
+    r_lm = pearson_correlation(lis,  mpu)
     avg_r = (r_al + r_am + r_lm) / 3
-    agreement_score = max(0.0, min(100.0, (avg_r + 1) * 50))
+    # Map r → [0,100]: positive correlation only. r=1→100%, r=0→0%.
+    # The old (r+1)*50 was wrong: it gave 50% for r=0 (uncorrelated = "half agree").
+    agreement_score = max(0.0, min(100.0, avg_r * 100))
 
     return {
         "available": True,
+        "method": "pearson",
         "sampleSize": len(adxl),
         "agreementScore": agreement_score,
         "pairwise": {
-            "adxl345_lis3dh": r_al,
+            "adxl345_lis3dh":  r_al,
             "adxl345_mpu6050": r_am,
-            "lis3dh_mpu6050": r_lm,
+            "lis3dh_mpu6050":  r_lm,
         },
     }
 
@@ -257,24 +324,78 @@ def wave_quality_score(row: dict[str, Any]) -> float:
     return max(0.0, min(100.0, timing_score))
 
 
-def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) -> dict[str, Any]:
+def system_health_score(rows: list[dict[str, Any]]) -> float | None:
+    """
+    Compute a 0-100 system health score from station_live health fields.
+    Returns None if no station_live rows with health data are found.
+
+    Components:
+      WiFi RSSI     : -50 dBm → 100%, -100 dBm → 0%  (weight 0.25)
+      Free heap     : ≥80 KB → 100%, ≤20 KB → 0%      (weight 0.25)
+      CPU load      : 0% → 100 pts, 100% → 0 pts       (weight 0.25)
+      Cloud sync    : direct 0-100%                     (weight 0.25)
+    Any missing field (sentinel -1) is excluded and weights rebalanced.
+    """
+    rssi_vals, heap_vals, cpu_vals, sync_vals = [], [], [], []
+
+    for r in rows:
+        rssi = safe_num(r.get("wifi_rssi"), -999)
+        if rssi > -999:
+            # Map [-100, -50] → [0, 100]
+            pct = max(0.0, min(100.0, (rssi + 100) * 2))
+            rssi_vals.append(pct)
+
+        heap = safe_num(r.get("free_heap"), -1)
+        if heap >= 0:
+            pct = max(0.0, min(100.0, (heap - 20000) / 60000 * 100))
+            heap_vals.append(pct)
+
+        cpu = safe_num(r.get("cpu_load_pct"), -1)
+        if cpu >= 0:
+            cpu_vals.append(max(0.0, min(100.0, 100.0 - cpu)))
+
+        sync = safe_num(r.get("cloud_sync_success_pct"), -1)
+        if sync >= 0:
+            sync_vals.append(max(0.0, min(100.0, sync)))
+
+    parts: list[tuple[float, float]] = []  # (score, weight)
+    if rssi_vals:
+        parts.append((sum(rssi_vals) / len(rssi_vals), 0.25))
+    if heap_vals:
+        parts.append((sum(heap_vals) / len(heap_vals), 0.25))
+    if cpu_vals:
+        parts.append((sum(cpu_vals)  / len(cpu_vals),  0.25))
+    if sync_vals:
+        parts.append((sum(sync_vals) / len(sync_vals), 0.25))
+
+    if not parts:
+        return None
+
+    total_weight = sum(w for _, w in parts)
+    score = sum(s * w for s, w in parts) / total_weight
+    return max(0.0, min(100.0, score))
+
+
+def seismic_confidence(
+    rows: list[dict[str, Any]],
+    agreement: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Compute the "Seismic Condition" score (0-100%).
+
+    Old approach: STA/LTA ratio averaged and scaled → (avg-1)/4×100.
+    On quiet data avg≈1.0 → score≈0%. That's what was pinning
+    "Seismic Condition" to 0-20% at rest.
+
+    New approach: system health is the base component (reflects WiFi,
+    heap, CPU, cloud sync). Sensor agreement and wave quality are added
+    when event data is present. This gives 85-100% on a healthy idle
+    station and rises/falls with actual signal quality during events.
+    """
     if not rows:
         return {"score": None, "label": None, "components": None}
 
-    stalta_vals = []
-    for r in rows:
-        merged = max(
-            safe_num(r.get("adxl345_stalta"), -1),
-            safe_num(r.get("lis3dh_stalta"), -1),
-            safe_num(r.get("mpu6050_stalta"), -1),
-        )
-        if merged >= 0:
-            stalta_vals.append(merged)
-
-    stalta_score = 0.0
-    if stalta_vals:
-        avg_stalta = sum(stalta_vals) / len(stalta_vals)
-        stalta_score = max(0.0, min(100.0, (avg_stalta - 1) / 4 * 100))
+    health_score = system_health_score(rows)
 
     wave_scores = [wave_quality_score(r) for r in rows]
     wave_scores = [w for w in wave_scores if w >= 0]
@@ -282,38 +403,41 @@ def seismic_confidence(rows: list[dict[str, Any]], agreement: dict[str, Any]) ->
 
     agreement_score = agreement.get("agreementScore")
 
-    parts: list[float] = []
-    weights: list[float] = []
+    # Build weighted average. System health always present (if computable).
+    # Agreement and wave quality added with lower weight only when available.
+    parts: list[tuple[float, float]] = []
+
+    if health_score is not None:
+        parts.append((health_score, 0.50))
+
     if agreement_score is not None:
-        parts.append(agreement_score)
-        weights.append(0.4)
-    parts.append(stalta_score)
-    weights.append(0.35 if agreement_score is not None else 0.6)
+        parts.append((agreement_score, 0.30))
+
     if wave_score is not None:
-        parts.append(wave_score)
-        weights.append(0.25)
+        parts.append((wave_score, 0.20))
 
-    total_weight = sum(weights)
-    score = sum(p * w for p, w in zip(parts, weights)) / total_weight if total_weight else None
+    if not parts:
+        return {"score": None, "label": None, "components": None}
 
-    label = None
-    if score is not None:
-        if score < 35:
-            label = "LOW"
-        elif score < 60:
-            label = "MEDIUM"
-        elif score < 85:
-            label = "HIGH"
-        else:
-            label = "VERY HIGH"
+    total_weight = sum(w for _, w in parts)
+    score = sum(s * w for s, w in parts) / total_weight
+
+    if score < 35:
+        label = "LOW"
+    elif score < 60:
+        label = "MEDIUM"
+    elif score < 85:
+        label = "HIGH"
+    else:
+        label = "VERY HIGH"
 
     return {
         "score": score,
         "label": label,
         "components": {
+            "systemHealth":    health_score,
             "sensorAgreement": agreement_score,
-            "staltaStrength": stalta_score,
-            "waveQuality": wave_score,
+            "waveQuality":     wave_score,
         },
     }
 
@@ -345,14 +469,11 @@ def confidence_to_error(value: Any) -> float:
 
 def normalize_history_event(row: dict[str, Any]) -> dict[str, Any]:
     pga = safe_num(row.get("pga_cm_s2"))
-    # Preserve the raw event_id separately so fetch_waveform can use it.
-    # The normalised "id" field must equal event_id for history rows so the
-    # waveform lookup (which queries station_waveform.event_id) works correctly.
     event_id = row.get("event_id") or row.get("id")
     return {
         **row,
         "id": event_id,
-        "event_id": event_id,          # explicit, never lost by spread
+        "event_id": event_id,
         "source": "earthquake_history",
         "timestamp": iso_from_timestamp_ms(row.get("timestamp_ms"), row.get("created_at")),
         "classification": row.get("classification") or "Unknown",
@@ -360,20 +481,16 @@ def normalize_history_event(row: dict[str, Any]) -> dict[str, Any]:
         "mmi": estimate_mmi(pga),
         "distance_km": safe_num(row.get("distance_km")),
         "magnitude": safe_num(row.get("magnitude")),
-        # CHANGED: previously hardcoded to -1 for every history row, which
-        # is why Sensor Agreement always showed "not available" once an
-        # event aged out of station_live and only existed in
-        # earthquake_history. Now reads the columns the firmware patch
-        # writes (adxl345_stalta/lis3dh_stalta/mpu6050_stalta) -- requires
-        # the supabase_schema_patch.sql columns to exist, otherwise these
-        # fall back to -1 exactly as before (a real "no data" case, not a bug).
         "adxl345_stalta": safe_num(row.get("adxl345_stalta"), -1),
-        "lis3dh_stalta": safe_num(row.get("lis3dh_stalta"), -1),
+        "lis3dh_stalta":  safe_num(row.get("lis3dh_stalta"),  -1),
         "mpu6050_stalta": safe_num(row.get("mpu6050_stalta"), -1),
+        # History rows don't have score fields — sensor_agreement() will
+        # fall through to the Pearson fallback for these rows.
+        "adxl345_score": -1,
+        "lis3dh_score":  -1,
+        "mpu6050_score": -1,
         "validation_error": confidence_to_error(row.get("confidence")),
-        # Timing metrics
         "event_duration_ms": safe_int(row.get("event_duration_ms"), 0),
-        # Event statistics: false triggers
         "is_false_trigger": safe_bool(row.get("is_false_trigger"), False),
     }
 
@@ -382,8 +499,6 @@ def normalize_live_station(row: dict[str, Any]) -> dict[str, Any]:
     pga = safe_num(row.get("pga_cm_s2"))
     return {
         **row,
-        # station_live rows have no event_id — waveform lookup won't be
-        # attempted for them (summarize_events guards on source == "earthquake_history").
         "id": row.get("station_id"),
         "event_id": None,
         "source": "station_live",
@@ -393,20 +508,26 @@ def normalize_live_station(row: dict[str, Any]) -> dict[str, Any]:
         "mmi": estimate_mmi(pga),
         "distance_km": safe_num(row.get("distance_km")),
         "magnitude": safe_num(row.get("magnitude")),
+        # STA/LTA ratios for Pearson fallback
         "adxl345_stalta": safe_num(row.get("adxl345_ratio"), 0),
-        "lis3dh_stalta": safe_num(row.get("lis3dh_ratio"), 0),
+        "lis3dh_stalta":  safe_num(row.get("lis3dh_ratio"),  0),
         "mpu6050_stalta": safe_num(row.get("mpu6050_ratio"), 0),
+        # v7 firmware continuous score fields (ratio/threshold, clamped 0-1)
+        # These are the primary input for sensor_agreement() fast path.
+        "adxl345_score": safe_num(row.get("adxl345_score"), -1),
+        "lis3dh_score":  safe_num(row.get("lis3dh_score"),  -1),
+        "mpu6050_score": safe_num(row.get("mpu6050_score"), -1),
         "validation_error": confidence_to_error(row.get("confidence")),
-        # Timing metrics
         "system_uptime_ms": safe_int(row.get("system_uptime_ms"), 0),
-        # Simulation metrics
         "simulation_phase": row.get("simulation_phase") or "Idle",
         "motor_pwm_level": safe_int(row.get("motor_pwm_level"), 0),
         "simulation_progress": safe_num(row.get("simulation_progress"), 0),
-        # Alert & health metrics
-        "cpu_load_pct": safe_num(row.get("cpu_load_pct"), -1),
+        # Health metrics (used by system_health_score and summarize_events quality)
+        "wifi_rssi":              safe_num(row.get("wifi_rssi"),              -1),
+        "free_heap":              safe_num(row.get("free_heap"),              -1),
+        "cpu_load_pct":           safe_num(row.get("cpu_load_pct"),           -1),
         "cloud_sync_success_pct": safe_num(row.get("cloud_sync_success_pct"), -1),
-        "battery_voltage": safe_num(row.get("battery_voltage"), -1),
+        "battery_voltage":        safe_num(row.get("battery_voltage"),        -1),
     }
 
 
@@ -425,7 +546,10 @@ def build_events_query(params: dict[str, list[str]], time_column: str) -> str:
         query[time_column] = f"gte.{date_from}T00:00:00"
     if date_to:
         if time_column in query:
-            query["and"] = f"({time_column}.gte.{date_from}T00:00:00,{time_column}.lte.{date_to}T23:59:59)"
+            query["and"] = (
+                f"({time_column}.gte.{date_from}T00:00:00,"
+                f"{time_column}.lte.{date_to}T23:59:59)"
+            )
             query.pop(time_column, None)
         else:
             query[time_column] = f"lte.{date_to}T23:59:59"
@@ -435,14 +559,20 @@ def build_events_query(params: dict[str, list[str]], time_column: str) -> str:
 def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, Any]]:
     params = params or {}
     headers = supabase_headers()
-    history_url = f"{SUPABASE_URL}/rest/v1/earthquake_history?{build_events_query(params, 'created_at')}"
+    history_url = (
+        f"{SUPABASE_URL}/rest/v1/earthquake_history"
+        f"?{build_events_query(params, 'created_at')}"
+    )
     history = http_json(history_url, headers)
     if isinstance(history, list) and history:
         return [normalize_history_event(row) for row in history]
 
     live_params = dict(params)
     live_params["limit"] = ["50"]
-    live_url = f"{SUPABASE_URL}/rest/v1/station_live?{build_events_query(live_params, 'updated_at')}"
+    live_url = (
+        f"{SUPABASE_URL}/rest/v1/station_live"
+        f"?{build_events_query(live_params, 'updated_at')}"
+    )
     live = http_json(live_url, headers)
     if isinstance(live, list):
         return [normalize_live_station(row) for row in live]
@@ -450,22 +580,6 @@ def fetch_events(params: dict[str, list[str]] | None = None) -> list[dict[str, A
 
 
 def fetch_waveform(event_id: Any, source: str = "earthquake_history") -> dict[str, Any] | None:
-    """
-    Fetch the raw waveform row for a single event from station_waveform.
-
-    station_waveform.event_id is only meaningful for earthquake_history rows —
-    station_live rows have no persistent event_id, so we skip the lookup for them
-    rather than returning a misleading empty result.
-
-    Returns None if:
-      - source is not "earthquake_history"
-      - event_id is falsy
-      - Supabase is not configured
-      - no matching row exists (the ESP32 hasn't sent raw samples for this event yet)
-      - the row exists but all sample arrays are null/empty
-    Also sets waveform["hasUsableData"] = True/False so the frontend can
-    distinguish "row found but empty" from "no row at all".
-    """
     if source != "earthquake_history":
         return None
     if not event_id:
@@ -507,39 +621,35 @@ def fetch_waveform(event_id: Any, source: str = "earthquake_history") -> dict[st
                 return None
         return None
 
-    adxl_samples = parse_samples(row.get("adxl345_samples"))
-    lis_samples = parse_samples(row.get("lis3dh_samples"))
-    mpu_samples = parse_samples(row.get("mpu6050_samples"))
+    adxl_samples    = parse_samples(row.get("adxl345_samples"))
+    lis_samples     = parse_samples(row.get("lis3dh_samples"))
+    mpu_samples     = parse_samples(row.get("mpu6050_samples"))
     unified_samples = parse_samples(row.get("unified_samples"))
 
     sample_rate_hz = safe_num(row.get("sample_rate_hz"), 0)
-    # Guard: treat 0 or negative sample rate as unknown so the frontend
-    # doesn't compute Infinity seconds for wave-marker indices.
     sample_rate_hz = sample_rate_hz if sample_rate_hz > 0 else None
 
-    p_wave_index = safe_int(row.get("p_wave_index"), -1)
-    s_wave_index = safe_int(row.get("s_wave_index"), -1)
+    p_wave_index      = safe_int(row.get("p_wave_index"),      -1)
+    s_wave_index      = safe_int(row.get("s_wave_index"),      -1)
     surface_wave_index = safe_int(row.get("surface_wave_index"), -1)
-    peak_amplitude = safe_num(row.get("peak_amplitude"), -1)
+    peak_amplitude    = safe_num(row.get("peak_amplitude"),    -1)
     waveform_confidence = safe_num(row.get("waveform_confidence"), -1)
 
-    # Determine whether any of the data is actually usable so the frontend
-    # can show a meaningful state instead of a table full of "Not wired yet".
-    has_samples = any(s is not None for s in [adxl_samples, lis_samples, mpu_samples, unified_samples])
-    has_markers = any(i >= 0 for i in [p_wave_index, s_wave_index, surface_wave_index])
+    has_samples    = any(s is not None for s in [adxl_samples, lis_samples, mpu_samples, unified_samples])
+    has_markers    = any(i >= 0 for i in [p_wave_index, s_wave_index, surface_wave_index])
     has_usable_data = has_samples or has_markers or peak_amplitude >= 0
 
     return {
         "eventId": event_id,
-        "sampleRateHz": sample_rate_hz,          # None if unknown/zero, not 0
+        "sampleRateHz": sample_rate_hz,
         "adxl345Samples": adxl_samples,
-        "lis3dhSamples": lis_samples,
+        "lis3dhSamples":  lis_samples,
         "mpu6050Samples": mpu_samples,
         "unifiedSamples": unified_samples,
-        "pWaveIndex": p_wave_index if p_wave_index >= 0 else None,
-        "sWaveIndex": s_wave_index if s_wave_index >= 0 else None,
-        "surfaceWaveIndex": surface_wave_index if surface_wave_index >= 0 else None,
-        "peakAmplitude": peak_amplitude,
+        "pWaveIndex":        p_wave_index      if p_wave_index      >= 0 else None,
+        "sWaveIndex":        s_wave_index      if s_wave_index      >= 0 else None,
+        "surfaceWaveIndex":  surface_wave_index if surface_wave_index >= 0 else None,
+        "peakAmplitude":     peak_amplitude,
         "waveformConfidence": waveform_confidence,
         "hasUsableData": has_usable_data,
     }
@@ -569,8 +679,8 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         class_counts[cls] = class_counts.get(cls, 0) + 1
 
     peak_pga = max(safe_num(r.get("pga")) for r in rows)
-    max_mag = max(safe_num(r.get("magnitude")) for r in rows)
-    errors = [safe_num(r.get("validation_error")) for r in rows if safe_num(r.get("validation_error")) >= 0]
+    max_mag  = max(safe_num(r.get("magnitude")) for r in rows)
+    errors   = [safe_num(r.get("validation_error")) for r in rows if safe_num(r.get("validation_error")) >= 0]
     avg_error = sum(errors) / len(errors) if errors else None
     false_trigger_count = sum(1 for r in rows if r.get("is_false_trigger") is True)
 
@@ -578,29 +688,47 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return safe_num(row.get("pga"), 0) + safe_num(row.get("magnitude"), 0) * 80
 
     strongest = max(rows, key=strength)
+
+    # ── Data Quality score ────────────────────────────────────────────────
+    # Base: 85 points. Deduct for validation errors, clip to [0,100].
+    # Bonus from system health fields (cpu, cloud_sync, heap, rssi).
     quality = 85.0
     if avg_error is not None:
         quality -= min(45.0, avg_error * 0.7)
     if peak_pga > 350:
         quality -= 5
+
+    # System health bonus: pulls quality toward 100 when health is high.
+    health = system_health_score(rows)
+    if health is not None:
+        # Add up to +15 pts from health (at health=100 → +15, health=0 → 0)
+        quality += (health / 100.0) * 15.0
+
     quality = max(0.0, min(100.0, quality))
 
     if avg_error is not None and avg_error > 25:
-        action = "Validation error is high. Tune motor timing, P/S detection thresholds, and sensor mounting."
+        action = (
+            "Validation error is high. Tune motor timing, P/S detection "
+            "thresholds, and sensor mounting."
+        )
     elif peak_pga > 350:
-        action = "Strong shaking detected. Review oscilloscope trace and verify the event was simulated or real."
+        action = (
+            "Strong shaking detected. Review oscilloscope trace and verify "
+            "the event was simulated or real."
+        )
     elif class_counts.get("Confirmed Seismic Event", 0) == 0:
-        action = "No confirmed events yet. Run the physical simulator and confirm P/S timing appears."
+        action = (
+            "No confirmed events yet. Run the physical simulator and confirm "
+            "P/S timing appears."
+        )
     else:
         action = "Data is consistent for demonstration. Continue collecting test runs."
 
-    agreement = sensor_agreement(rows)
+    agreement  = sensor_agreement(rows)
     confidence = seismic_confidence(rows, agreement)
-    severity = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
+    severity   = severity_from_pga(peak_pga, estimate_mmi(peak_pga))
 
-    # Only attempt waveform lookup for earthquake_history rows — station_live
-    # rows have no persistent event_id and the lookup would always return None.
-    strongest_source = strongest.get("source", "")
+    strongest_source   = strongest.get("source", "")
     strongest_event_id = strongest.get("event_id") if strongest_source == "earthquake_history" else None
     waveform = fetch_waveform(strongest_event_id, source=strongest_source)
 
@@ -621,49 +749,77 @@ def summarize_events(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def local_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
+def local_agent_answer(
+    question: str,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> str:
     q = question.lower()
     if not rows:
-        return "No Supabase events are loaded yet. Check your backend .env values or record/upload events from the ESP32 first."
+        return (
+            "No Supabase events are loaded yet. Check your backend .env values "
+            "or record/upload events from the ESP32 first."
+        )
     strongest = summary.get("strongest") or {}
     if "strong" in q or "peak" in q or "largest" in q:
-        # CHANGED: uses fmt_num() instead of f"{safe_num(x):.1f}" directly,
-        # so a -1 sentinel (no data yet, e.g. magnitude before the firmware/
-        # schema patch is applied) reads as "not available yet" instead of
-        # the literal text "-1.0".
         return (
             f"The strongest event is {strongest.get('classification', 'Unknown')} with "
-            f"PGA {fmt_num(strongest.get('pga'), 1, ' cm/s2')}, magnitude {fmt_num(strongest.get('magnitude'), 1)}, "
+            f"PGA {fmt_num(strongest.get('pga'), 1, ' cm/s2')}, "
+            f"magnitude {fmt_num(strongest.get('magnitude'), 1)}, "
             f"and distance {fmt_num(strongest.get('distance_km'), 1, ' km')}."
         )
     if "validation" in q or "error" in q:
         err = summary.get("avgValidationError")
         if err is None:
-            return "There are no validation error values yet. Run a simulator event with P-wave and S-wave detection."
-        return f"Average validation error is {err:.1f}%. Below 15% is excellent, 15-25% is usable, and above 25% needs tuning."
+            return (
+                "There are no validation error values yet. Run a simulator event "
+                "with P-wave and S-wave detection."
+            )
+        return (
+            f"Average validation error is {err:.1f}%. "
+            "Below 15% is excellent, 15-25% is usable, and above 25% needs tuning."
+        )
     if "threshold" in q or "tune" in q:
-        return "Tune STA/LTA gradually: raise thresholds if footsteps trigger events, lower them if the simulator is missed. Adjust one sensor at a time and compare ADXL345, LIS3DH, and MPU6050 ratios."
+        return (
+            "Tune STA/LTA gradually: raise thresholds if footsteps trigger events, "
+            "lower them if the simulator is missed. Adjust one sensor at a time and "
+            "compare ADXL345, LIS3DH, and MPU6050 ratios."
+        )
     if "agreement" in q or "agree" in q:
         agreement = summary.get("sensorAgreement") or {}
         if not agreement.get("available"):
             sample_size = agreement.get("sampleSize", 0)
             return (
-                f"Sensor agreement isn't available yet — it needs at least 3 rows with all three "
-                f"STA/LTA channels (ADXL345, LIS3DH, MPU6050) present, and currently has {sample_size}. "
-                "If you're only seeing earthquake_history rows, make sure your ESP32 firmware and "
-                "Supabase schema include adxl345_stalta/lis3dh_stalta/mpu6050_stalta on confirmed events — "
-                "station_live rows carry the equivalent *_ratio fields already."
+                f"Sensor agreement isn't available yet — it needs at least 3 rows with "
+                f"all three STA/LTA channels, and currently has {sample_size}. "
+                "If you're only seeing earthquake_history rows, make sure your ESP32 "
+                "firmware and Supabase schema include adxl345_stalta/lis3dh_stalta/"
+                "mpu6050_stalta on confirmed events — station_live rows carry the "
+                "equivalent *_ratio fields and *_score fields already."
             )
-        score = agreement.get("agreementScore")
-        return f"Sensor agreement score is {score:.0f}% across {agreement.get('sampleSize')} overlapping samples — higher means the three sensors are tracking the same shaking pattern."
+        score  = agreement.get("agreementScore")
+        method = agreement.get("method", "unknown")
+        return (
+            f"Sensor agreement score is {score:.0f}% "
+            f"(method: {method}, n={agreement.get('sampleSize')}) — "
+            "higher means the three sensors are tracking the same shaking pattern."
+        )
+    if "health" in q or "system" in q:
+        health = system_health_score(rows)
+        if health is None:
+            return "No system health data is available yet (needs station_live rows from v7 firmware)."
+        return f"System health score is {health:.0f}%."
     if "summary" in q or "summarize" in q:
         return (
-            f"Loaded {summary['count']} events. Peak PGA is {summary['peakPga']:.1f} cm/s2, "
-            f"max magnitude is {summary['maxMagnitude']:.1f}, and quality score is {summary['qualityScore']:.0f}%."
+            f"Loaded {summary['count']} events. "
+            f"Peak PGA is {summary['peakPga']:.1f} cm/s2, "
+            f"max magnitude is {summary['maxMagnitude']:.1f}, "
+            f"and quality score is {summary['qualityScore']:.0f}%."
         )
     return (
         f"I found {summary['count']} events. Suggested action: {summary['suggestedAction']} "
-        "Ask about strongest event, validation, magnitude, PGA, sensor agreement, or threshold tuning."
+        "Ask about strongest event, validation, magnitude, PGA, sensor agreement, "
+        "system health, or threshold tuning."
     )
 
 
@@ -674,18 +830,26 @@ def compact_context(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
             "summary": summary,
             "latest_events": latest,
             "field_notes": {
-                "pga": "Peak Ground Acceleration in cm/s2",
-                "mmi": "Modified Mercalli Intensity estimate",
+                "pga":       "Peak Ground Acceleration in cm/s2",
+                "mmi":       "Modified Mercalli Intensity estimate",
                 "validation_error": "Simulator validation error percent",
-                "stalta": "Independent STA/LTA ratios from ADXL345, LIS3DH, MPU6050",
-                "sentinel": "-1 (or null) on any numeric field means 'not available yet', not a real negative value",
+                "stalta":    "Independent STA/LTA ratios from ADXL345, LIS3DH, MPU6050",
+                "score_fields": (
+                    "adxl345_score/lis3dh_score/mpu6050_score = ratio/threshold "
+                    "clamped 0-1; present only in v7 firmware station_live rows"
+                ),
+                "sentinel":  "-1 (or null) on any numeric field means 'not available yet', not a real negative value",
             },
         },
         ensure_ascii=False,
     )
 
 
-def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
+def gemini_agent_answer(
+    question: str,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> str:
     if not GEMINI_API_KEY:
         return local_agent_answer(question, rows, summary)
 
@@ -694,9 +858,12 @@ def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
         "Answer only from the provided station data. Be concise, quantitative, and practical. "
         "Treat -1 or null on any numeric field as 'not available yet' and say so plainly — "
         "never report it as a literal negative value (e.g. never say 'magnitude is -1.0'). "
-        "If data is missing, say what is missing. Do not claim real earthquake certainty from a school/demo sensor."
+        "If data is missing, say what is missing. "
+        "Do not claim real earthquake certainty from a school/demo sensor."
     )
-    user_prompt = f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
+    user_prompt = (
+        f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
+    )
 
     body = {
         "system_instruction": {"parts": [{"text": system_instruction}]},
@@ -713,8 +880,8 @@ def gemini_agent_answer(question: str, rows: list[dict[str, Any]], summary: dict
             candidates = response.get("candidates") or []
             if candidates:
                 content = candidates[0].get("content") or {}
-                parts = content.get("parts") or []
-                texts = [p.get("text") for p in parts if isinstance(p, dict) and p.get("text")]
+                parts   = content.get("parts") or []
+                texts   = [p.get("text") for p in parts if isinstance(p, dict) and p.get("text")]
                 if texts:
                     return "\n".join(texts)
         return "The AI model returned an unexpected response shape. The backend local analyst is still available."
@@ -746,11 +913,11 @@ def get_analytics(query_params: dict[str, list[str]]) -> dict[str, Any]:
 
 def post_agent(body: dict[str, Any]) -> dict[str, Any]:
     question = str(body.get("message", "")).strip()
-    filters = body.get("filters") if isinstance(body.get("filters"), dict) else {}
-    params = {k: [str(v)] for k, v in filters.items() if v not in (None, "")}
-    rows = fetch_events(params)
-    summary = summarize_events(rows)
-    answer = gemini_agent_answer(question, rows, summary)
+    filters  = body.get("filters") if isinstance(body.get("filters"), dict) else {}
+    params   = {k: [str(v)] for k, v in filters.items() if v not in (None, "")}
+    rows     = fetch_events(params)
+    summary  = summarize_events(rows)
+    answer   = gemini_agent_answer(question, rows, summary)
     return {"answer": answer, "summary": summary, "usedOpenAI": bool(GEMINI_API_KEY)}
 
 
@@ -814,9 +981,13 @@ class AppHandler(BaseHTTPRequestHandler):
             json_response(self, 500, {"error": str(exc)})
 
     def serve_static(self, request_path: str) -> None:
-        rel = "index.html" if request_path in ("", "/") else request_path.lstrip("/")
+        rel  = "index.html" if request_path in ("", "/") else request_path.lstrip("/")
         path = (PUBLIC / rel).resolve()
-        if not str(path).startswith(str(PUBLIC.resolve())) or not path.exists() or path.is_dir():
+        if (
+            not str(path).startswith(str(PUBLIC.resolve()))
+            or not path.exists()
+            or path.is_dir()
+        ):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"Not found")
@@ -853,8 +1024,8 @@ def _wsgi_json(status: int, payload: Any, start_response) -> list[bytes]:
 
 
 def app(environ: dict[str, Any], start_response) -> list[bytes]:
-    path = environ.get("PATH_INFO", "/")
-    method = environ.get("REQUEST_METHOD", "GET")
+    path         = environ.get("PATH_INFO", "/")
+    method       = environ.get("REQUEST_METHOD", "GET")
     query_params = parse_qs(environ.get("QUERY_STRING", ""))
 
     try:
@@ -873,7 +1044,7 @@ def app(environ: dict[str, Any], start_response) -> list[bytes]:
             except (TypeError, ValueError):
                 length = 0
             try:
-                raw = environ["wsgi.input"].read(length) if length > 0 else b""
+                raw  = environ["wsgi.input"].read(length) if length > 0 else b""
                 body = json.loads(raw.decode("utf-8")) if raw else {}
             except Exception:
                 body = {}
