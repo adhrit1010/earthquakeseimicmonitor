@@ -508,6 +508,10 @@ def normalize_live_station(row: dict[str, Any]) -> dict[str, Any]:
         "mmi": estimate_mmi(pga),
         "distance_km": safe_num(row.get("distance_km")),
         "magnitude": safe_num(row.get("magnitude")),
+        # Timing: p_wave_ms / s_wave_ms are real only when > 0.
+        # DB default is 0; pass through as-is so renderTimingMetrics can guard.
+        "p_wave_ms": safe_num(row.get("p_wave_ms"), 0),
+        "s_wave_ms": safe_num(row.get("s_wave_ms"), 0),
         # STA/LTA ratios for Pearson fallback
         "adxl345_stalta": safe_num(row.get("adxl345_ratio"), 0),
         "lis3dh_stalta":  safe_num(row.get("lis3dh_ratio"),  0),
@@ -518,10 +522,10 @@ def normalize_live_station(row: dict[str, Any]) -> dict[str, Any]:
         "lis3dh_score":  safe_num(row.get("lis3dh_score"),  -1),
         "mpu6050_score": safe_num(row.get("mpu6050_score"), -1),
         "validation_error": confidence_to_error(row.get("confidence")),
-        "system_uptime_ms": safe_int(row.get("system_uptime_ms"), 0),
-        "simulation_phase": row.get("simulation_phase") or "Idle",
-        "motor_pwm_level": safe_int(row.get("motor_pwm_level"), 0),
-        "simulation_progress": safe_num(row.get("simulation_progress"), 0),
+        "system_uptime_ms": safe_int(row.get("system_uptime_ms"), -1),
+        "simulation_phase": row.get("simulation_phase") or None,
+        "motor_pwm_level": safe_int(row.get("motor_pwm_level"), -1),
+        "simulation_progress": safe_num(row.get("simulation_progress"), -1),
         # Health metrics (used by system_health_score and summarize_events quality)
         "wifi_rssi":              safe_num(row.get("wifi_rssi"),              -1),
         "free_heap":              safe_num(row.get("free_heap"),              -1),
