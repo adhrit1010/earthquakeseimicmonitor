@@ -1481,25 +1481,39 @@ static int __attribute__((optimize("Os"),noinline)) supabaseAttempt(const char* 
     // if it's 0 (the normal case) we skip draining entirely; if there is a
     // body we read exactly that many bytes with a short bounded wait. This is
     // the single biggest win for upload throughput on the keep-alive path.
-    int contentLen = supabaseHttp.getSize();   // Content-Length, -1 if unknown
-    if (contentLen != 0) {                     // 0 => return=minimal, nothing to drain
-      WiFiClient* stream = supabaseHttp.getStreamPtr();
-      if (stream) {
-        int remaining = contentLen;            // >0 known, -1 unknown (chunked)
-        unsigned long drainStart = millis();
-        while (millis() - drainStart < 40) {
-          int avail = stream->available();
-          if (avail > 0) {
-            while (avail-- > 0) {
-              stream->read();
-              if (remaining > 0 && --remaining == 0) break;
+    if (code >= 200 && code < 300) {
+      // Success: drain the (usually empty, return=minimal) body so the
+      // keep-alive connection stays clean. Content-Length 0 => nothing to read.
+      int contentLen = supabaseHttp.getSize();
+      if (contentLen != 0) {
+        WiFiClient* stream = supabaseHttp.getStreamPtr();
+        if (stream) {
+          int remaining = contentLen;
+          unsigned long drainStart = millis();
+          while (millis() - drainStart < 40) {
+            int avail = stream->available();
+            if (avail > 0) {
+              while (avail-- > 0) {
+                stream->read();
+                if (remaining > 0 && --remaining == 0) break;
+              }
+              if (remaining == 0) break;
+            } else {
+              vTaskDelay(pdMS_TO_TICKS(2));
             }
-            if (remaining == 0) break;         // read the whole declared body
-          } else {
-            vTaskDelay(pdMS_TO_TICKS(2));        // yield; bounded by the 40 ms cap
           }
         }
       }
+    } else if (code > 0) {
+      // HTTP-level error (4xx/5xx): PostgREST returns a JSON error body that
+      // pinpoints the cause — schema mismatch ("column ... does not exist"),
+      // bad/absent API key ("No API key found" / JWT error), RLS policy denial,
+      // wrong table, etc. PRINT it so the failure is actually diagnosable
+      // instead of just a bare status code. This is usually what reveals why
+      // uploads "don't work" once the network and heap are fine.
+      String err = supabaseHttp.getString();
+      Serial.printf("[UP] HTTP %d body: %s\n", code,
+                    err.length() ? err.substring(0, 220).c_str() : "(empty)");
     }
 
     supabaseHttp.end();
@@ -1585,6 +1599,52 @@ static bool __attribute__((optimize("Os"),noinline)) supabaseRequest(const char*
   }
 
   return ok;
+}
+
+// ----------------------------------------------------------------
+//  Supabase self-test — runs ONCE at boot (Core 1, before the upload task
+//  exists, so no Core-0 contention). It does a tiny GET against station_live
+//  and prints the exact result, so "uploads don't work" stops being a mystery:
+//  it tells you immediately whether the URL/key/table/RLS are right or not.
+// ----------------------------------------------------------------
+static void __attribute__((optimize("Os"),noinline)) supabaseSelfTest() {
+  // Catch the most common mistake first: credentials never filled in.
+  if (strstr(SUPABASE_URL, "YOUR_PROJECT_ID") ||
+      strstr(SUPABASE_ANON_KEY, "YOUR_SUPABASE")) {
+    Serial.println(F("[UP] *** SUPABASE_URL / SUPABASE_ANON_KEY are still the "
+                     "placeholder values — fill them in. No uploads are possible until you do. ***"));
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  static char url[224];
+  snprintf(url, sizeof(url),
+           "%s/rest/v1/station_live?select=station_id&limit=1", SUPABASE_URL);
+
+  ensureSupabaseClient();
+  if (supabaseHttp.begin(supabaseClient, url)) {
+    supabaseHttp.addHeader("apikey",         SUPABASE_ANON_KEY);
+    supabaseHttp.addHeader("Authorization", "Bearer " SUPABASE_ANON_KEY);
+    int code = supabaseHttp.GET();
+    String body = supabaseHttp.getString();
+    Serial.printf("[UP] Self-test GET station_live -> HTTP %d : %s\n",
+                  code, body.length() ? body.substring(0, 200).c_str() : "(empty)");
+    if (code == 200)
+      Serial.println(F("[UP] Supabase reachable, key accepted, table exists — uploads should work."));
+    else if (code == 401 || code == 403)
+      Serial.println(F("[UP]  -> 401/403: anon key wrong/missing, or RLS blocks anon access."));
+    else if (code == 404)
+      Serial.println(F("[UP]  -> 404: URL or table name wrong (did you run supabase_schema.sql?)."));
+    else if (code <= 0)
+      Serial.println(F("[UP]  -> connect/TLS failed (DNS, certificate, or not enough heap)."));
+    supabaseHttp.end();
+  } else {
+    Serial.println(F("[UP] Self-test: http.begin() failed (URL malformed or TLS init failed)."));
+  }
+
+  // Leave a clean slate for the Core-0 upload task to (re)initialise.
+  supabaseHttpReady = false;
+  resetSupabaseClient();
 }
 
 
@@ -2404,6 +2464,9 @@ void setup() {
   } else {
     Serial.println(F("    Heap looks healthy for TLS uploads."));
   }
+
+  // ── Supabase connectivity self-test (one shot, before the upload task) ──
+  supabaseSelfTest();
 
   // ── FreeRTOS upload queue ─────────────────────────────────────
   // Queue holds UploadMessage structs by value.
