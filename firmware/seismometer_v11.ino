@@ -133,14 +133,13 @@
 #include <HTTPClient.h>
 #include <math.h>
 #include <arduinoFFT.h>
-// Motor control moved from Classic Bluetooth (SPP) to BLE: Classic BT's
-// bluedroid stack consumed ~86 KB of heap, starving the TLS uploader (which
-// needs a contiguous ~16 KB record buffer) so nothing uploaded. BLE's
-// footprint is far smaller, freeing ~50 KB and letting WiFi + TLS + BLE coexist.
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+// Motor control runs over BLE, using the **NimBLE-Arduino** library (install it
+// from Library Manager: Tools → Manage Libraries → search "NimBLE-Arduino").
+// NimBLE's BLE stack is far lighter than the built-in Bluedroid one — it frees
+// another ~20-30 KB of heap and, crucially, leaves large CONTIGUOUS blocks, so
+// the TLS uploader can finally allocate its ~16 KB record buffer and uploads
+// to Supabase succeed.
+#include <NimBLEDevice.h>
 #include "esp_bt.h"          // esp_bt_controller_mem_release (free Classic RAM)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -459,12 +458,18 @@ volatile bool bleConnected = false;
 static volatile char bleRxRing[BLE_RX_RING];
 static volatile int  bleRxHead = 0, bleRxTail = 0;
 
+// Helper used by the RX callback to push one byte into the ring buffer.
+static inline void bleRxPush(char c) {
+  int next = (bleRxHead + 1) % BLE_RX_RING;
+  if (next != bleRxTail) { bleRxRing[bleRxHead] = c; bleRxHead = next; }
+}
+
 class BLESerial : public Print {
  public:
-  BLECharacteristic* txChar = nullptr;
+  NimBLECharacteristic* txChar = nullptr;
   String lineBuf;                       // TX is written only from Core 1 (loop)
 
-  void attachTx(BLECharacteristic* c) { txChar = c; }
+  void attachTx(NimBLECharacteristic* c) { txChar = c; }
 
   // TX: accumulate a line, then push it out as 20-byte BLE notify chunks.
   size_t write(uint8_t c) override {
@@ -505,49 +510,56 @@ BLESerial BT;
 
 // Inbound write -> push bytes into the ring, delimited with '\n' so
 // parseBTCommand fires even when the app writes a command without a newline.
-class BLERxCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) override {
-    uint8_t* d = c->getData();
-    size_t   len = c->getLength();
-    for (size_t i = 0; i < len; i++) {
-      int next = (bleRxHead + 1) % BLE_RX_RING;
-      if (next != bleRxTail) { bleRxRing[bleRxHead] = (char)d[i]; bleRxHead = next; }
-    }
-    int next = (bleRxHead + 1) % BLE_RX_RING;
-    if (next != bleRxTail) { bleRxRing[bleRxHead] = '\n'; bleRxHead = next; }
+// NimBLE 2.x added a NimBLEConnInfo& parameter to the callbacks; guard so this
+// compiles on both 1.x and 2.x of NimBLE-Arduino.
+class BLERxCallback : public NimBLECharacteristicCallbacks {
+#if defined(NIMBLE_CPP_VERSION_MAJOR) && (NIMBLE_CPP_VERSION_MAJOR >= 2)
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*info*/) override {
+#else
+  void onWrite(NimBLECharacteristic* c) override {
+#endif
+    auto v = c->getValue();             // NimBLEAttValue (2.x) / std::string (1.x)
+    for (size_t i = 0; i < v.length(); i++) bleRxPush((char)v[i]);
+    bleRxPush('\n');
   }
 };
 
-class BLEConnCallback : public BLEServerCallbacks {
-  void onConnect(BLEServer*) override { bleConnected = true; }
-  void onDisconnect(BLEServer*) override {
+class BLEConnCallback : public NimBLEServerCallbacks {
+#if defined(NIMBLE_CPP_VERSION_MAJOR) && (NIMBLE_CPP_VERSION_MAJOR >= 2)
+  void onConnect(NimBLEServer*, NimBLEConnInfo&) override { bleConnected = true; }
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
     bleConnected = false;
-    BLEDevice::startAdvertising();      // re-advertise so it can reconnect
+    NimBLEDevice::startAdvertising();   // re-advertise so it can reconnect
   }
+#else
+  void onConnect(NimBLEServer*) override { bleConnected = true; }
+  void onDisconnect(NimBLEServer*) override {
+    bleConnected = false;
+    NimBLEDevice::startAdvertising();
+  }
+#endif
 };
 
 static void __attribute__((optimize("Os"),noinline)) initBLE() {
-  BLEDevice::init(BLE_DEVICE_NAME);
-  BLEServer* srv = BLEDevice::createServer();
+  NimBLEDevice::init(BLE_DEVICE_NAME);
+  NimBLEServer* srv = NimBLEDevice::createServer();
   srv->setCallbacks(new BLEConnCallback());
 
-  BLEService* svc = srv->createService(BLE_SERVICE_UUID);
+  NimBLEService* svc = srv->createService(BLE_SERVICE_UUID);
 
-  BLECharacteristic* tx = svc->createCharacteristic(
-      BLE_CHAR_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
-  tx->addDescriptor(new BLE2902());
+  // NimBLE auto-creates the CCCD (2902) for NOTIFY — no descriptor needed.
+  NimBLECharacteristic* tx = svc->createCharacteristic(
+      BLE_CHAR_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
   BT.attachTx(tx);
 
-  BLECharacteristic* rx = svc->createCharacteristic(
-      BLE_CHAR_RX_UUID,
-      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  NimBLECharacteristic* rx = svc->createCharacteristic(
+      BLE_CHAR_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   rx->setCallbacks(new BLERxCallback());
 
   svc->start();
-  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(BLE_SERVICE_UUID);
-  adv->setScanResponse(true);
-  BLEDevice::startAdvertising();
+  NimBLEDevice::startAdvertising();
 }
 
 bool adxlOk = true;
