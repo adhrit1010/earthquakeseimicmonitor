@@ -342,6 +342,18 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define FREE_BLE_MEMORY 1
 
 // ----------------------------------------------------------------
+//  On-device web server (HEAP)
+//
+//  The ESP32 hosts a small local dashboard at its own IP. When you view the
+//  station through the Supabase/Vercel cloud dashboard instead, that on-device
+//  server is redundant — and it both consumes heap and processes incoming
+//  connections (fragmenting the heap right where TLS needs a contiguous 16 KB
+//  block). Default OFF to give the TLS uploader the most room. Set to 1 if you
+//  want to browse the station directly on the LAN.
+// ----------------------------------------------------------------
+#define ENABLE_LOCAL_WEBSERVER 0
+
+// ----------------------------------------------------------------
 //  Upload queue sizes
 //  LIVE_QUEUE_LEN : how many live JSON payloads can be queued
 //                   before Core 0 catches up. Bumped from 2 to 4
@@ -1402,6 +1414,23 @@ static bool __attribute__((optimize("Os"),noinline)) supabaseRequest(const char*
     return false;
   }
 
+  // TLS-fit diagnostic. A TLS handshake needs a contiguous ~16 KB record
+  // buffer (mbedTLS IN/OUT content length). With WiFi + Classic BT resident,
+  // total free heap can read ~30 KB while the LARGEST contiguous block is well
+  // under 16 KB due to fragmentation — in which case the handshake fails with
+  // code -1 ("TLS/TCP connect failed") and NOTHING uploads even though "free
+  // heap" looks OK. Log both on the first few requests and warn if the biggest
+  // block is too small to hold a TLS buffer.
+  static uint32_t reqCount = 0;
+  uint32_t freeH = ESP.getFreeHeap();
+  uint32_t maxBlk = ESP.getMaxAllocHeap();
+  if (reqCount++ < 5) {
+    Serial.printf("[UP] pre-request heap: free=%u, largest_block=%u\n", freeH, maxBlk);
+    if (maxBlk < 17000)
+      Serial.println(F("  ! largest block < 17 KB — a TLS handshake likely can't fit "
+                       "(fragmentation). This is why uploads fail despite free heap."));
+  }
+
   // FIX: url buffer was declared as a local (stack) inside the old
   // supabaseAttempt, then passed by pointer to http.begin() which held
   // a reference to it for the duration of the request. If the compiler
@@ -2336,10 +2365,16 @@ void setup() {
 
   Serial.print(F("Heap after task launch: ")); Serial.println(ESP.getFreeHeap());
 
+#if ENABLE_LOCAL_WEBSERVER
   server.on("/",             handleRoot);
   server.on("/api/live",     handleApiLive);
   server.on("/api/waveform", handleApiWaveform);
   server.begin();
+  Serial.println(F("Local web server enabled."));
+#else
+  Serial.println(F("Local web server DISABLED (heap saved for TLS uploads). "
+                   "Set ENABLE_LOCAL_WEBSERVER 1 to browse the station on the LAN."));
+#endif
 
   Serial.println(F("System ready."));
   Serial.print(F("Final free heap: ")); Serial.println(ESP.getFreeHeap());
@@ -2351,7 +2386,9 @@ void setup() {
 //  LOOP  (Core 1 — never touches TLS, never blocks BT)
 // ================================================================
 void loop() {
+#if ENABLE_LOCAL_WEBSERVER
   server.handleClient();
+#endif
   checkBluetooth();
   updateShaker();
 
