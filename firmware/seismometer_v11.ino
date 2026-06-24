@@ -308,6 +308,26 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define HEAP_GUARD 18000
 
 // ----------------------------------------------------------------
+//  Free unused BLE controller memory (HEAP RECOVERY)
+//
+//  Serial logs showed free heap collapsing to ~6 KB after BT + WiFi init,
+//  which starves TLS uploads (need ~30-40 KB), the BT SPP socket, and even
+//  WiFi association — the single root cause behind "uploads slow / no data",
+//  "Bluetooth socket failure", and "WiFi failed" all at once.
+//
+//  This project uses ONLY Classic Bluetooth (BluetoothSerial / SPP) for motor
+//  control — never BLE. esp_bt_controller_mem_release(ESP_BT_MODE_BLE), called
+//  before the controller starts, permanently hands the BLE-only RAM (~30-40 KB)
+//  back to the heap. That's usually enough to get TLS + WiFi + SPP all fitting.
+//
+//  If your Arduino board config builds the controller in dual-mode (BTDM) and
+//  BT then refuses to start, set this to 0 (and prefer a "BR/EDR only" /
+//  Classic-only BT build in Tools/sdkconfig, which both shrinks the controller
+//  and makes this release safe).
+// ----------------------------------------------------------------
+#define FREE_BLE_MEMORY 1
+
+// ----------------------------------------------------------------
 //  Upload queue sizes
 //  LIVE_QUEUE_LEN : how many live JSON payloads can be queued
 //                   before Core 0 catches up. Bumped from 2 to 4
@@ -1977,7 +1997,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(200);
-  Serial.println(F("\n=== TremorLab seismometer boot (rev 7) ==="));
+  Serial.println(F("\n=== TremorLab seismometer boot (rev 11) ==="));
 
   // ── Heap-allocate all large buffers ──────────────────────────
   adxlHistory        = (float*)malloc(BUFFER_SIZE       * sizeof(float));
@@ -2063,6 +2083,16 @@ void setup() {
     esp_bt_controller_deinit();
     delay(100);
   }
+
+#if FREE_BLE_MEMORY
+  // Hand the unused BLE-only controller RAM (~30-40 KB) back to the heap before
+  // the Classic controller starts. This is the main heap-recovery step — with
+  // it, TLS uploads, WiFi association and the BT SPP socket all have room.
+  // Must be done while the controller is IDLE (it now is, after the teardown).
+  esp_err_t bleRel = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+  Serial.printf("BLE mem release: %s | heap now %u\n",
+                esp_err_to_name(bleRel), (unsigned)ESP.getFreeHeap());
+#endif
 
   // begin() now owns the full, clean initialisation from IDLE. The retry (with
   // another full teardown) covers the rare case where the first teardown didn't
@@ -2171,6 +2201,19 @@ void setup() {
     BT.print("WiFi: "); BT.println(WiFi.localIP().toString());
   } else {
     Serial.println(F("\nWiFi failed — offline mode. Supabase disabled."));
+    Serial.println(F("  -> Check that ssid/password are set (not the YOUR_WIFI_* placeholders),"));
+    Serial.println(F("     and watch the heap line below: WiFi needs free heap to associate."));
+  }
+  Serial.print(F("Heap after WiFi: ")); Serial.println(ESP.getFreeHeap());
+
+  // Heap health gate: TLS (WiFiClientSecure) needs ~30-40 KB for a handshake.
+  // If we're below that the uploads will be slow/failing no matter what — make
+  // it loud so the cause isn't mistaken for a network problem.
+  uint32_t freeNow = ESP.getFreeHeap();
+  if (freeNow < 40000) {
+    Serial.printf("*** LOW HEAP WARNING: %u bytes free. TLS uploads need ~30-40 KB. ***\n", freeNow);
+    Serial.println(F("    Classic Bluetooth is the main consumer. FREE_BLE_MEMORY is "
+                     "on; if still low, use a BR/EDR-only BT build or move motor control to BLE."));
   }
 
   // ── FreeRTOS upload queue ─────────────────────────────────────
