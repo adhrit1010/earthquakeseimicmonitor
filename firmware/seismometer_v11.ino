@@ -1309,32 +1309,26 @@ static void __attribute__((optimize("Os"),noinline)) printOscilloscope(
 // ----------------------------------------------------------------
 //  SEISMIC WAVEFORM (Arduino Serial PLOTTER) — replaces oscilloscope CSV
 //
-//  Emits the three conditioned sensor channels plus the merged STA/LTA ratio
-//  in the IDE's "label:value,label:value" Serial Plotter format, one line per
-//  sample (100 Hz). Open Tools → Serial Plotter (NOT Serial Monitor) and you
-//  get four live named waveforms: ADXL / LIS / MPU ground motion and the
-//  trigger ratio. P_flag / S_flag are emitted as 0/1 step traces so the wave
-//  arrivals show up as markers on the same plot.
+//  Open Tools → Serial Plotter (NOT Serial Monitor). You get five named,
+//  properly-integrated traces on ONE comparable scale:
+//    ADXL / LIS / MPU — each sensor's offset-free signal NORMALISED by its own
+//      calibration rest-noise, so the three plot together meaningfully (units =
+//      multiples of that sensor's quiet noise) instead of one channel (different
+//      raw units/scale) flattening the others.
+//    Pwave / Swave — step markers that jump to fixed visible levels (20 / 30)
+//      the instant a P or S arrival is detected, so the wave picks stay on the
+//      oscilloscope alongside the signals.
+//  Values are pre-normalised by the caller (it has the per-sensor rest-noise),
+//  so this just formats them.
 //
 //  (Keep the Serial Monitor closed while plotting — they can't both read the
 //  port at once.)
 // ----------------------------------------------------------------
 static void __attribute__((optimize("Os"),noinline)) printSeismicWaveform(
-    float adxlCond, float lisCond, float gyroCond,
-    float adxlR, float lisR, float gyroR,
-    bool pwave, bool swave, const char* cls) {
-
-  (void)cls;  // class is shown on the dashboard; the plotter wants numbers only
-
-  float merged = adxlR;
-  if (lisR  > merged) merged = lisR;
-  if (gyroR > merged) merged = gyroR;
-
-  // label:value pairs, comma-separated, newline-terminated — the format the
-  // Arduino IDE 2.x Serial Plotter parses into named series.
-  Serial.printf("ADXL:%.4f,LIS:%.4f,MPU:%.4f,STALTA:%.3f,P:%d,S:%d\n",
-                (double)adxlCond, (double)lisCond, (double)gyroCond,
-                (double)merged, pwave ? 1 : 0, swave ? 1 : 0);
+    float adxlN, float lisN, float gyroN, bool pwave, bool swave) {
+  Serial.printf("ADXL:%.2f,LIS:%.2f,MPU:%.2f,Pwave:%.0f,Swave:%.0f\n",
+                (double)adxlN, (double)lisN, (double)gyroN,
+                pwave ? 20.0 : 0.0, swave ? 30.0 : 0.0);
 }
 
 
@@ -2309,8 +2303,12 @@ void setup() {
   gyroBaseY = mpuOk  ? gy / CAL_N : 0.0f;
   gyroBaseZ = mpuOk  ? gz / CAL_N : 0.0f;
 
-  // Pass 2: rest-noise RMS of each baseline-subtracted magnitude.
+  // Pass 2: rest mean + rest-noise RMS of each baseline-subtracted magnitude.
+  // The mean is used to PRE-SEED the drift/EMA filters so the conditioned
+  // signal sits at zero from the very first loop — no startup offset to settle
+  // out, regardless of each sensor's individual bias.
   float adxlSq = 0, lisSq = 0, gyroSq = 0;
+  float adxlSum = 0, lisSum = 0, gyroSum = 0;
   for (int i = 0; i < CAL_N; i++) {
     if (adxlOk) {
       sensors_event_t e; adxl.getEvent(&e);
@@ -2318,40 +2316,50 @@ void setup() {
       float dy = e.acceleration.y - adxlBaseY;
       float dz = e.acceleration.z - adxlBaseZ;
       float m = sqrtf(dx*dx + dy*dy + dz*dz) / 9.81f;
-      adxlSq += m * m;
+      adxlSq += m * m; adxlSum += m;
     }
     if (lisOk) {
       lis.read();
       float dx = lis.x_g - lisBaseX, dy = lis.y_g - lisBaseY, dz = lis.z_g - lisBaseZ;
       float m = sqrtf(dx*dx + dy*dy + dz*dz);
-      lisSq += m * m;
+      lisSq += m * m; lisSum += m;
     }
     if (mpuOk) {
       int16_t ax, ay, az, rgx, rgy, rgz;
       mpu.getMotion6(&ax, &ay, &az, &rgx, &rgy, &rgz);
       float dx = rgx/131.0f - gyroBaseX, dy = rgy/131.0f - gyroBaseY, dz = rgz/131.0f - gyroBaseZ;
       float m = sqrtf(dx*dx + dy*dy + dz*dz);
-      gyroSq += m * m;
+      gyroSq += m * m; gyroSum += m;
     }
     delay(20);
   }
   adxlRestNoise = adxlOk ? sqrtf(adxlSq / CAL_N) : 0.0f;
   lisRestNoise  = lisOk  ? sqrtf(lisSq  / CAL_N) : 0.0f;
   gyroRestNoise = mpuOk  ? sqrtf(gyroSq / CAL_N) : 0.0f;
+  float adxlRestMean = adxlOk ? adxlSum / CAL_N : 0.0f;
+  float lisRestMean  = lisOk  ? lisSum  / CAL_N : 0.0f;
+  float gyroRestMean = mpuOk  ? gyroSum / CAL_N : 0.0f;
+  // Guard against a zero/near-zero noise floor (a flat/stuck sensor) so the
+  // plotter normalisation below can never divide by ~0.
+  if (adxlRestNoise < 1e-5f) adxlRestNoise = 1e-5f;
+  if (lisRestNoise  < 1e-5f) lisRestNoise  = 1e-5f;
+  if (gyroRestNoise < 1e-5f) gyroRestNoise = 1e-5f;
 
   Serial.println(F("Calibration done. Per-sensor REST NOISE (RMS):"));
   Serial.printf("  ADXL345: %.5f g   LIS3DH: %.5f g   MPU6050: %.5f dps\n",
                 (double)adxlRestNoise, (double)lisRestNoise, (double)gyroRestNoise);
   // Troubleshooting hint: a near-zero ADXL rest-noise means it's reading flat
   // (ODR/wiring) rather than truly quiet — that's what crushes its sensor score.
-  if (adxlOk && adxlRestNoise < 0.0005f)
+  if (adxlOk && adxlRestNoise <= 1e-5f)
     Serial.println(F("  ! ADXL345 rest-noise ~0 — likely flat/stuck (check ODR, wiring, I2C)."));
 
-  adxlFiltered = lisFiltered = gyroFiltered = 0.0f;
-  adxlDrift    = lisDrift    = gyroDrift    = 0.0f;
-  adxlRaw1 = adxlRaw2 = adxlRaw3 = 0.0f;
-  lisRaw1  = lisRaw2  = lisRaw3  = 0.0f;
-  gyroRaw1 = gyroRaw2 = gyroRaw3 = 0.0f;
+  // Pre-seed filter + drift to the measured rest mean -> zero offset from t=0.
+  adxlFiltered = adxlDrift = adxlRestMean;
+  lisFiltered  = lisDrift  = lisRestMean;
+  gyroFiltered = gyroDrift = gyroRestMean;
+  adxlRaw1 = adxlRaw2 = adxlRaw3 = adxlRestMean;
+  lisRaw1  = lisRaw2  = lisRaw3  = lisRestMean;
+  gyroRaw1 = gyroRaw2 = gyroRaw3 = gyroRestMean;
   adxlRatioMean = lisRatioMean = gyroRatioMean = 1.0f;
   adxlRatioVar  = lisRatioVar  = gyroRatioVar  = 0.25f;
   adaptSampleCount = 0;
@@ -2706,15 +2714,18 @@ void loop() {
     pushWebWaveform(adxlCond, gyroCond);
   }
 
-  // ── Seismic waveform Serial output (replaces oscilloscope CSV) ──
-  printSeismicWaveform(
-    adxlCond, lisCond, gyroCond,
-    adxlR, lisR, gyroR,
-    pWaveDetected, sWaveDetected, eventClass
-  );
-  (void)adxlRawMag; (void)adxlMed; (void)adxlFilt;
-  (void)lisRawMag;  (void)lisMed;  (void)lisFilt;
-  (void)gyroRawMag; (void)gyroMed; (void)gyroFilt;
+  // ── Seismic waveform Serial output (Serial Plotter) ────────────
+  // Signed, offset-free signal per sensor = filtered - drift (the high-pass
+  // output, centred at zero after calibration), normalised by that sensor's
+  // calibration rest-noise so all three share one comparable scale. Clamped so
+  // a single large spike can't crush the plot's auto-scale.
+  float adxlN = constrain((adxlFilt - adxlDrift) / adxlRestNoise, -50.0f, 50.0f);
+  float lisN  = constrain((lisFilt  - lisDrift)  / lisRestNoise,  -50.0f, 50.0f);
+  float gyroN = constrain((gyroFilt - gyroDrift) / gyroRestNoise, -50.0f, 50.0f);
+  printSeismicWaveform(adxlN, lisN, gyroN, pWaveDetected, sWaveDetected);
+  (void)adxlRawMag; (void)adxlMed;
+  (void)lisRawMag;  (void)lisMed;
+  (void)gyroRawMag; (void)gyroMed;
   (void)printOscilloscope;  // kept available; silence unused-function warning
 
   // ── Deferred Supabase uploads — enqueue, never block ──────────
