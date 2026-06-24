@@ -133,14 +133,13 @@
 #include <HTTPClient.h>
 #include <math.h>
 #include <arduinoFFT.h>
-// Motor control moved from Classic Bluetooth (SPP) to BLE: Classic BT's
-// bluedroid stack consumed ~86 KB of heap, starving the TLS uploader (which
-// needs a contiguous ~16 KB record buffer) so nothing uploaded. BLE's
-// footprint is far smaller, freeing ~50 KB and letting WiFi + TLS + BLE coexist.
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+// Motor control runs over BLE, using the **NimBLE-Arduino** library (install it
+// from Library Manager: Tools → Manage Libraries → search "NimBLE-Arduino").
+// NimBLE's BLE stack is far lighter than the built-in Bluedroid one — it frees
+// another ~20-30 KB of heap and, crucially, leaves large CONTIGUOUS blocks, so
+// the TLS uploader can finally allocate its ~16 KB record buffer and uploads
+// to Supabase succeed.
+#include <NimBLEDevice.h>
 #include "esp_bt.h"          // esp_bt_controller_mem_release (free Classic RAM)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -365,8 +364,14 @@ const char* password = "YOUR_WIFI_PASSWORD";
 //                   protects against the occasional slow request.
 //  EVENT_QUEUE_LEN: up to 4 event/waveform pairs queued.
 // ----------------------------------------------------------------
-#define LIVE_QUEUE_LEN    4
-#define EVENT_QUEUE_LEN   4
+//  HEAP/FRAGMENTATION FIX: cut 4+4 -> 2+2. Each UploadMessage slot is ~1.4 KB,
+//  so 8 slots is an ~11 KB CONTIGUOUS block sitting in the middle of the heap —
+//  a major reason the largest free block fell below the ~16 KB a TLS handshake
+//  needs (uploads failed with "largest_block < 17 KB"). 2+2 is plenty: live
+//  frames upload in ~150 ms and are produced every 500 ms, so the queue never
+//  backs up past 1-2 items in steady state. Frees ~5.6 KB and de-fragments.
+#define LIVE_QUEUE_LEN    2
+#define EVENT_QUEUE_LEN   2
 
 // ----------------------------------------------------------------
 //  Upload payload types passed through the queue
@@ -453,12 +458,18 @@ volatile bool bleConnected = false;
 static volatile char bleRxRing[BLE_RX_RING];
 static volatile int  bleRxHead = 0, bleRxTail = 0;
 
+// Helper used by the RX callback to push one byte into the ring buffer.
+static inline void bleRxPush(char c) {
+  int next = (bleRxHead + 1) % BLE_RX_RING;
+  if (next != bleRxTail) { bleRxRing[bleRxHead] = c; bleRxHead = next; }
+}
+
 class BLESerial : public Print {
  public:
-  BLECharacteristic* txChar = nullptr;
+  NimBLECharacteristic* txChar = nullptr;
   String lineBuf;                       // TX is written only from Core 1 (loop)
 
-  void attachTx(BLECharacteristic* c) { txChar = c; }
+  void attachTx(NimBLECharacteristic* c) { txChar = c; }
 
   // TX: accumulate a line, then push it out as 20-byte BLE notify chunks.
   size_t write(uint8_t c) override {
@@ -499,49 +510,56 @@ BLESerial BT;
 
 // Inbound write -> push bytes into the ring, delimited with '\n' so
 // parseBTCommand fires even when the app writes a command without a newline.
-class BLERxCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) override {
-    uint8_t* d = c->getData();
-    size_t   len = c->getLength();
-    for (size_t i = 0; i < len; i++) {
-      int next = (bleRxHead + 1) % BLE_RX_RING;
-      if (next != bleRxTail) { bleRxRing[bleRxHead] = (char)d[i]; bleRxHead = next; }
-    }
-    int next = (bleRxHead + 1) % BLE_RX_RING;
-    if (next != bleRxTail) { bleRxRing[bleRxHead] = '\n'; bleRxHead = next; }
+// NimBLE 2.x added a NimBLEConnInfo& parameter to the callbacks; guard so this
+// compiles on both 1.x and 2.x of NimBLE-Arduino.
+class BLERxCallback : public NimBLECharacteristicCallbacks {
+#if defined(NIMBLE_CPP_VERSION_MAJOR) && (NIMBLE_CPP_VERSION_MAJOR >= 2)
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*info*/) override {
+#else
+  void onWrite(NimBLECharacteristic* c) override {
+#endif
+    auto v = c->getValue();             // NimBLEAttValue (2.x) / std::string (1.x)
+    for (size_t i = 0; i < v.length(); i++) bleRxPush((char)v[i]);
+    bleRxPush('\n');
   }
 };
 
-class BLEConnCallback : public BLEServerCallbacks {
-  void onConnect(BLEServer*) override { bleConnected = true; }
-  void onDisconnect(BLEServer*) override {
+class BLEConnCallback : public NimBLEServerCallbacks {
+#if defined(NIMBLE_CPP_VERSION_MAJOR) && (NIMBLE_CPP_VERSION_MAJOR >= 2)
+  void onConnect(NimBLEServer*, NimBLEConnInfo&) override { bleConnected = true; }
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
     bleConnected = false;
-    BLEDevice::startAdvertising();      // re-advertise so it can reconnect
+    NimBLEDevice::startAdvertising();   // re-advertise so it can reconnect
   }
+#else
+  void onConnect(NimBLEServer*) override { bleConnected = true; }
+  void onDisconnect(NimBLEServer*) override {
+    bleConnected = false;
+    NimBLEDevice::startAdvertising();
+  }
+#endif
 };
 
 static void __attribute__((optimize("Os"),noinline)) initBLE() {
-  BLEDevice::init(BLE_DEVICE_NAME);
-  BLEServer* srv = BLEDevice::createServer();
+  NimBLEDevice::init(BLE_DEVICE_NAME);
+  NimBLEServer* srv = NimBLEDevice::createServer();
   srv->setCallbacks(new BLEConnCallback());
 
-  BLEService* svc = srv->createService(BLE_SERVICE_UUID);
+  NimBLEService* svc = srv->createService(BLE_SERVICE_UUID);
 
-  BLECharacteristic* tx = svc->createCharacteristic(
-      BLE_CHAR_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
-  tx->addDescriptor(new BLE2902());
+  // NimBLE auto-creates the CCCD (2902) for NOTIFY — no descriptor needed.
+  NimBLECharacteristic* tx = svc->createCharacteristic(
+      BLE_CHAR_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
   BT.attachTx(tx);
 
-  BLECharacteristic* rx = svc->createCharacteristic(
-      BLE_CHAR_RX_UUID,
-      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  NimBLECharacteristic* rx = svc->createCharacteristic(
+      BLE_CHAR_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   rx->setCallbacks(new BLERxCallback());
 
   svc->start();
-  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(BLE_SERVICE_UUID);
-  adv->setScanResponse(true);
-  BLEDevice::startAdvertising();
+  NimBLEDevice::startAdvertising();
 }
 
 bool adxlOk = true;
@@ -2478,31 +2496,24 @@ void setup() {
     while (true) delay(1000);
   }
 
-  // ── Upload task on Core 0, stack 12 KB, priority 2 ───────────
-  // Core 1 runs the Arduino loop (sensor + BT + shaker + web server).
-  // Core 0 runs only the WiFi/BT stack + this upload task.
+  // ── Upload task on Core 0 ────────────────────────────────────
+  // Core 1 runs the Arduino loop (sensor + BLE + shaker). Core 0 runs the
+  // WiFi/BLE stack + this upload task.
   //
-  // FIX: stack raised from 8192 → 12288.
-  //   WiFiClientSecure TLS buffers alone consume ~6 KB of stack.
-  //   Add HTTPClient local state, supabaseRequest locals, and the
-  //   192-byte URL buffer and 8192 was regularly overflowing silently,
-  //   corrupting TLS state and causing the persistent connection to die
-  //   mid-stream. 12 KB gives comfortable headroom.
+  // STACK 8 KB (was 12 KB): the runtime stack high-water-mark watchdog showed
+  // peak usage of only ~2.9 KB — i.e. WiFiClientSecure's TLS record buffers
+  // live on the HEAP, not this stack, so 12 KB was ~9 KB of wasted, heap-
+  // fragmenting RAM. 8 KB leaves >5 KB margin over the measured peak and frees
+  // 4 KB back to the heap (which is what TLS needs a contiguous block of).
   //
-  // FIX: priority raised from 1 → 2.
-  //   The Arduino loop() runs at FreeRTOS priority 1. With uploadTask
-  //   also at priority 1, the FreeRTOS scheduler round-robins them,
-  //   meaning the upload task only gets CPU when loop() yields (only
-  //   at delay(10) and xQueueReceive). Raising to priority 2 lets the
-  //   upload task preempt loop() immediately when a queue item arrives,
-  //   so uploads happen in the 10 ms window between sensor samples
-  //   rather than queuing up behind them.
+  // Priority 2 so the uploader preempts loop() immediately when a queue item
+  // arrives (loop() runs at priority 1).
   xTaskCreatePinnedToCore(
     uploadTask,       // function
     "uploadTask",     // name
-    12288,            // stack bytes (was 8192 — too small for TLS + HTTPClient)
+    8192,             // stack bytes (12288 -> 8192; watchdog proved ~2.9 KB peak)
     nullptr,          // param
-    2,                // priority (was 1 — raised so uploader preempts sensor loop)
+    2,                // priority
     &uploadTaskHandle,// task handle — used for stack high-water-mark monitoring
     0                 // Core 0
   );
