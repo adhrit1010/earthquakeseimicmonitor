@@ -727,6 +727,42 @@ def _event_ref(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def station_health_snapshot(
+    live_rows: list[dict[str, Any]] | None,
+    score: float | None,
+) -> dict[str, Any]:
+    """
+    Raw station-health fields from the most recent live row, for the dedicated
+    "Station health" card. Returns available=False when no live row exists.
+    Each field is None when the station hasn't reported it (sentinel -1).
+    """
+    ref = live_rows[0] if live_rows else None
+    snap: dict[str, Any] = {"available": ref is not None, "score": score}
+    if not ref:
+        return snap
+
+    def pos(key: str) -> float | None:
+        v = safe_num(ref.get(key), -1)
+        return v if v >= 0 else None
+
+    rssi = safe_num(ref.get("wifi_rssi"), 0)  # real RSSI is negative; 0 = unknown
+    snap.update({
+        "wifiRssi": rssi if rssi < 0 else None,
+        "freeHeap": pos("free_heap"),
+        "cpuLoad": pos("cpu_load_pct"),
+        "cloudSync": pos("cloud_sync_success_pct"),
+        "battery": pos("battery_voltage"),
+        "classification": ref.get("classification"),
+        "updatedAt": ref.get("timestamp"),
+        "sensorScores": {
+            "adxl345": pos("adxl345_score"),
+            "lis3dh": pos("lis3dh_score"),
+            "mpu6050": pos("mpu6050_score"),
+        },
+    })
+    return snap
+
+
 def summarize_events(
     rows: list[dict[str, Any]],
     live_rows: list[dict[str, Any]] | None = None,
@@ -736,9 +772,15 @@ def summarize_events(
     # (which has neither), fall back to the freshly-fetched live rows so the
     # Data-quality, Sensor-correlation and Seismic-confidence cards keep
     # working instead of collapsing to "no data".
-    health_rows = live_rows if live_rows else rows
-    agreement_rows = live_rows if live_rows else rows
+    # System health and the score-based agreement live on station_live rows.
+    # Prefer the dedicated live fetch; else any live-source rows in `rows`.
+    live_for_health = live_rows if live_rows else [
+        r for r in rows if r.get("source") == "station_live"
+    ]
+    health_rows = live_for_health if live_for_health else rows
+    agreement_rows = live_for_health if live_for_health else rows
     health = system_health_score(health_rows)
+    health_snapshot = station_health_snapshot(live_for_health, health)
 
     if not rows:
         agreement = sensor_agreement(agreement_rows)
@@ -761,6 +803,7 @@ def summarize_events(
             "severity": severity_from_pga(-1, -1),
             "falseTriggerCount": 0,
             "waveform": None,
+            "health": health_snapshot,
         }
 
     class_counts: dict[str, int] = {}
@@ -839,6 +882,7 @@ def summarize_events(
         "severity": severity,
         "falseTriggerCount": false_trigger_count,
         "waveform": waveform,
+        "health": health_snapshot,
     }
 
 
@@ -998,21 +1042,15 @@ def gemini_agent_answer(
         return local_agent_answer(question, rows, summary)
 
     system_instruction = (
-        "You are TriAxis Station Analyst, a careful seismic instrumentation assistant. "
-        "Answer only from the provided station data — never invent values or cite "
-        "earthquakes outside this dataset. Be concise, quantitative, and practical. "
-        "Treat -1 or null on any numeric field as 'not available yet' and say so plainly — "
-        "never report it as a literal negative value (e.g. never say 'magnitude is -1.0'). "
-        "If data is missing, say what is missing.\n\n"
-        "Structure EVERY reply in two short parts:\n"
-        "1. Reading — the direct, factual answer drawn from the data (numbers, what they say).\n"
-        "2. Suggestion — your own concrete, actionable recommendation that follows from that "
-        "reading: what the operator should check, tune, or watch next, grounded in the actual "
-        "values you just cited. Always give a Suggestion, even for a simple question; keep it "
-        "specific to THIS station's current data, not generic seismology advice.\n\n"
-        "Stay in context: tie the suggestion to the fields you referenced (STA/LTA ratios, "
-        "sensor agreement, validation error, system health, PGA/magnitude, sensor triggers, "
-        "shaker/simulation state). Do not claim real earthquake certainty from a school/demo sensor."
+        "You are TriAxis Station Analyst, a knowledgeable and helpful seismic "
+        "monitoring assistant for a 3-sensor ESP32 station (ADXL345, LIS3DH, MPU6050). "
+        "You have the station's current data as context, but you are NOT restricted to it — "
+        "answer the user's question fully and naturally, drawing on your own seismology and "
+        "instrumentation knowledge whenever it helps, and offer your own analysis, "
+        "interpretation, and suggestions freely. "
+        "Use the station data when it's relevant and cite real numbers from it; if a numeric "
+        "field is -1 or null, treat it as 'not reported yet' rather than a real negative value. "
+        "Be clear, practical and conversational — no rigid template required."
     )
     user_prompt = (
         f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
@@ -1057,6 +1095,16 @@ def get_status() -> dict[str, Any]:
 def get_events(query_params: dict[str, list[str]]) -> dict[str, Any]:
     rows = fetch_events(query_params)
     return {"events": rows}
+
+
+def get_live() -> dict[str, Any]:
+    """
+    Latest station_live row(s), independent of the event view. The dashboard
+    polls this on a short interval so the live readout, LED/buzzer alert and
+    helicorder track the real-time station instead of a frozen history event.
+    """
+    rows = fetch_live_rows(max_rows=1)
+    return {"live": rows[0] if rows else None, "rows": rows}
 
 
 def get_analytics(query_params: dict[str, list[str]]) -> dict[str, Any]:
@@ -1112,6 +1160,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/events":
             try:
                 json_response(self, 200, get_events(parse_qs(parsed.query)))
+            except Exception as exc:
+                json_response(self, 500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/live":
+            try:
+                json_response(self, 200, get_live())
             except Exception as exc:
                 json_response(self, 500, {"error": str(exc)})
             return
@@ -1189,6 +1243,9 @@ def app(environ: dict[str, Any], start_response) -> list[bytes]:
 
         if method == "GET" and path == "/api/events":
             return _wsgi_json(200, get_events(query_params), start_response)
+
+        if method == "GET" and path == "/api/live":
+            return _wsgi_json(200, get_live(), start_response)
 
         if method == "GET" and path == "/api/analytics":
             return _wsgi_json(200, get_analytics(query_params), start_response)

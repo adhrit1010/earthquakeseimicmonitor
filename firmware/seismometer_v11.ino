@@ -291,20 +291,21 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define WEB_WAVEFORM_SIZE   60
 
 // ----------------------------------------------------------------
-//  Heap guard — 14 KB (lowered from 18 KB).
+//  Heap guard — 18 KB (restored from a 14 KB experiment).
 //
-//  WHY station_waveform was never populating: with idle free heap ~21-22 KB,
-//  an 18 KB guard left under ~4 KB of working room. buildWaveformJson() needs
-//  to malloc a multi-KB sample buffer AND that buffer is still held when the
-//  uploader re-checks the guard before POSTing it — so the waveform upload was
-//  mathematically guaranteed to be skipped ("Skip waveform build / heap").
-//  The heap-allocated part of a TLS upload (WiFiClientSecure read buffer +
-//  HTTPClient state) is ~6-8 KB; the TLS I/O buffers live on the upload task's
-//  12 KB stack, not the heap. A 14 KB guard still leaves >6 KB clear after a
-//  ~2.5 KB waveform buffer is held, which covers the TLS heap need with margin
-//  while finally allowing both station_live AND station_waveform to upload.
+//  SPEED: 14 KB was too low. It let live uploads proceed when free heap was
+//  14-18 KB — not enough for a TLS *handshake* if the keep-alive connection
+//  ever drops — so those attempts failed (-1) and fell into the slow full-
+//  handshake retry path on Core 0, which is exactly the "uploads got very
+//  slow" regression. 18 KB is the value the original rev-11 firmware used and
+//  ran fine at: it skips an upload only when the heap genuinely can't support
+//  the request, avoiding the failure→retry thrash.
+//
+//  station_waveform still uploads: buildWaveformJson() now mallocs a smaller
+//  (~2.5 KB) buffer and only builds when free >= HEAP_GUARD + BUF, so after
+//  the malloc there is still >= HEAP_GUARD free for the POST.
 // ----------------------------------------------------------------
-#define HEAP_GUARD 14000
+#define HEAP_GUARD 18000
 
 // ----------------------------------------------------------------
 //  Upload queue sizes
@@ -366,6 +367,12 @@ typedef struct {
 //  FreeRTOS queue handle
 // ----------------------------------------------------------------
 static QueueHandle_t uploadQueue = nullptr;
+
+// Handle to the Core-0 network/upload task, kept so we can watch its stack
+// high-water mark at runtime (stack-overflow isolation for the BT/socket
+// investigation — the TLS stack lives here, so if anything is going to blow
+// a stack it's this task).
+static TaskHandle_t  uploadTaskHandle = nullptr;
 
 // ----------------------------------------------------------------
 //  Objects
@@ -523,11 +530,11 @@ float decayAmp = 180.0f;
 // ----------------------------------------------------------------
 //  Upload throttles (Core 1 side — just timing guards)
 // ----------------------------------------------------------------
-// Lowered 500 -> 300 ms: now that the response drain no longer costs ~100 ms
-// per request, the uploader keeps up with a faster cadence comfortably, so the
-// live row in Supabase is fresher. Raise this back toward 500 if you start
-// hitting Supabase rate limits.
-#define LIVE_UPLOAD_INTERVAL_MS   300
+// Back to the original 500 ms cadence (a 300 ms experiment added queue/Core-0
+// pressure). Per-upload latency is already much lower thanks to the
+// content-length-aware drain below, so 500 ms here is comfortably fast and
+// matches the cadence the original firmware ran fine at.
+#define LIVE_UPLOAD_INTERVAL_MS   500
 #define EVENT_COOLDOWN_MS        5000
 
 unsigned long lastLiveUpload       = 0;
@@ -1130,43 +1137,34 @@ static void __attribute__((optimize("Os"),noinline)) printOscilloscope(
 
 
 // ----------------------------------------------------------------
-//  SEISMIC WAVEFORM (serial monitor) — replaces the raw oscilloscope CSV
+//  SEISMIC WAVEFORM (Arduino Serial PLOTTER) — replaces oscilloscope CSV
 //
-//  Instead of dumping 18 conditioning columns (meant for a serial plotter),
-//  this draws a live drum-recorder style trace you can read directly in the
-//  Serial Monitor: a needle that deflects with the strongest accelerometer
-//  amplitude, marked 'P' / 'S' when those arrivals are detected, with the
-//  merged STA/LTA ratio and current classification on the right. Throttled to
-//  ~20 Hz so the monitor stays legible.
+//  Emits the three conditioned sensor channels plus the merged STA/LTA ratio
+//  in the IDE's "label:value,label:value" Serial Plotter format, one line per
+//  sample (100 Hz). Open Tools → Serial Plotter (NOT Serial Monitor) and you
+//  get four live named waveforms: ADXL / LIS / MPU ground motion and the
+//  trigger ratio. P_flag / S_flag are emitted as 0/1 step traces so the wave
+//  arrivals show up as markers on the same plot.
+//
+//  (Keep the Serial Monitor closed while plotting — they can't both read the
+//  port at once.)
 // ----------------------------------------------------------------
 static void __attribute__((optimize("Os"),noinline)) printSeismicWaveform(
     float adxlCond, float lisCond, float gyroCond,
     float adxlR, float lisR, float gyroR,
     bool pwave, bool swave, const char* cls) {
 
-  static unsigned long swLine = 0;
-  if (swLine++ % 5 != 0) return;   // ~20 Hz at the 100 Hz sample rate
-
-  const int WIDTH  = 41;
-  const int CENTER = WIDTH / 2;
-
-  // Strongest ground-motion amplitude (g); full-scale deflection at ~0.2 g.
-  float amp = (adxlCond > lisCond) ? adxlCond : lisCond;
-  int dev = (int)((amp / 0.2f) * CENTER);
-  if (dev > CENTER) dev = CENTER;
-  if (dev < 0)      dev = 0;
-  int pos = CENTER + dev;
-
-  char line[WIDTH + 1];
-  for (int i = 0; i < WIDTH; i++) line[i] = (i == CENTER) ? '|' : ' ';
-  line[pos]   = swave ? 'S' : (pwave ? 'P' : '*');
-  line[WIDTH] = '\0';
+  (void)cls;  // class is shown on the dashboard; the plotter wants numbers only
 
   float merged = adxlR;
   if (lisR  > merged) merged = lisR;
   if (gyroR > merged) merged = gyroR;
 
-  Serial.printf("%s  R:%5.2f  %s\n", line, (double)merged, cls);
+  // label:value pairs, comma-separated, newline-terminated — the format the
+  // Arduino IDE 2.x Serial Plotter parses into named series.
+  Serial.printf("ADXL:%.4f,LIS:%.4f,MPU:%.4f,STALTA:%.3f,P:%d,S:%d\n",
+                (double)adxlCond, (double)lisCond, (double)gyroCond,
+                (double)merged, pwave ? 1 : 0, swave ? 1 : 0);
 }
 
 
@@ -1320,12 +1318,12 @@ static int __attribute__((optimize("Os"),noinline)) supabaseAttempt(const char* 
     // body we read exactly that many bytes with a short bounded wait. This is
     // the single biggest win for upload throughput on the keep-alive path.
     int contentLen = supabaseHttp.getSize();   // Content-Length, -1 if unknown
-    if (contentLen != 0) {
+    if (contentLen != 0) {                     // 0 => return=minimal, nothing to drain
       WiFiClient* stream = supabaseHttp.getStreamPtr();
       if (stream) {
-        int remaining = contentLen;            // -1 => unknown (e.g. chunked)
+        int remaining = contentLen;            // >0 known, -1 unknown (chunked)
         unsigned long drainStart = millis();
-        while (millis() - drainStart < 50) {
+        while (millis() - drainStart < 40) {
           int avail = stream->available();
           if (avail > 0) {
             while (avail-- > 0) {
@@ -1333,10 +1331,8 @@ static int __attribute__((optimize("Os"),noinline)) supabaseAttempt(const char* 
               if (remaining > 0 && --remaining == 0) break;
             }
             if (remaining == 0) break;         // read the whole declared body
-          } else if (remaining < 0) {
-            break;                             // unknown length, nothing pending
           } else {
-            vTaskDelay(pdMS_TO_TICKS(2));       // yield to WiFi stack
+            vTaskDelay(pdMS_TO_TICKS(2));        // yield; bounded by the 40 ms cap
           }
         }
       }
@@ -1569,13 +1565,13 @@ static void __attribute__((optimize("Os"),noinline)) buildEventJson(char* out, s
 // ================================================================
 static char* __attribute__((optimize("Os"),noinline)) buildWaveformJson(const EventSnapshot& ev) {
   // 60 samples × 4 arrays at "%.2f" ≈ 1.7 KB of JSON; 2600 gives headroom.
-  // (Was 4200 — oversized, which combined with the old 18 KB guard made the
-  // allocation impossible on the ~21 KB idle heap, so waveforms never built.)
   const size_t BUF = 2600;
 
-  // Need enough free heap to hold this buffer AND still clear the upload guard
-  // afterwards (the buffer stays allocated until the POST completes on Core 0).
-  if (ESP.getFreeHeap() < (HEAP_GUARD + BUF + 2048)) {
+  // Build only if, AFTER holding this buffer, the upload still clears the heap
+  // guard (the buffer stays allocated until the POST completes on Core 0).
+  // i.e. require free >= HEAP_GUARD + BUF. Skipping a waveform when heap is
+  // tight is fine — station_live keeps flowing and we avoid low-heap TLS thrash.
+  if (ESP.getFreeHeap() < (HEAP_GUARD + BUF)) {
     Serial.printf("[UP] Skip waveform build: heap %u\n", ESP.getFreeHeap());
     return nullptr;
   }
@@ -1678,12 +1674,27 @@ static char* __attribute__((optimize("Os"),noinline)) buildWaveformJson(const Ev
 //  Core 1's BT, sensor loop, or shaker.
 // ================================================================
 static void __attribute__((optimize("Os"),noinline)) uploadTask(void* /*param*/) {
-  Serial.println(F("[UP] Upload task started on Core 0"));
+  Serial.printf("[UP] Upload task started on Core %d\n", xPortGetCoreID());
 
   UploadMessage msg;
   for (;;) {
     // Block here until something arrives — no CPU waste
     if (xQueueReceive(uploadQueue, &msg, portMAX_DELAY) != pdTRUE) continue;
+
+    // ── Stack-overflow / heap isolation watchdog ──────────────────
+    // High-water mark = smallest free stack (in words) this task has ever had.
+    // If it approaches 0 the 12 KB stack is being overrun (the classic cause
+    // of a TLS socket silently dying / "Bluetooth socket failure" via memory
+    // corruption). Logged once every 50 uploads so it's visible but not noisy.
+    static uint32_t upCount = 0;
+    if ((upCount++ % 50) == 0) {
+      UBaseType_t stackFreeWords =
+        uploadTaskHandle ? uxTaskGetStackHighWaterMark(uploadTaskHandle) : 0;
+      Serial.printf("[UP] watchdog: stack_free=%u bytes, heap_free=%u, min_heap=%u\n",
+                    (unsigned)(stackFreeWords * sizeof(StackType_t)),
+                    (unsigned)ESP.getFreeHeap(),
+                    (unsigned)ESP.getMinFreeHeap());
+    }
 
     switch (msg.type) {
 
@@ -2139,6 +2150,14 @@ void setup() {
 
   // ── WiFi ──────────────────────────────────────────────────────
   Serial.print(F("Connecting to WiFi: ")); Serial.println(ssid);
+  WiFi.mode(WIFI_STA);
+  // Disable WiFi modem power-save. With the default light-sleep, the radio
+  // parks between DTIM beacons and the first packet of each upload waits
+  // 100-300 ms for the radio to wake — a major, erratic source of upload
+  // latency AND of TLS sockets stalling/dropping (which feeds the BT/socket
+  // failure symptoms when the two stacks contend). Keeping the modem awake
+  // makes uploads consistently fast and the TCP sockets stable.
+  WiFi.setSleep(false);
   WiFi.begin(ssid, password);
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
@@ -2146,6 +2165,7 @@ void setup() {
     attempts++;
   }
   if (WiFi.status() == WL_CONNECTED) {
+    WiFi.setSleep(false);   // re-assert after association
     Serial.print(F("\nWiFi connected. Dashboard: http://"));
     Serial.println(WiFi.localIP());
     BT.print("WiFi: "); BT.println(WiFi.localIP().toString());
@@ -2188,7 +2208,7 @@ void setup() {
     12288,            // stack bytes (was 8192 — too small for TLS + HTTPClient)
     nullptr,          // param
     2,                // priority (was 1 — raised so uploader preempts sensor loop)
-    nullptr,          // task handle (not needed)
+    &uploadTaskHandle,// task handle — used for stack high-water-mark monitoring
     0                 // Core 0
   );
 
