@@ -262,7 +262,14 @@ const char* password = "YOUR_WIFI_PASSWORD";
 // (larger, later) must clear a higher bar so a single noisy axis can't be
 // mislabelled as an S arrival. Used in the P/S detection block in loop().
 #define P_RATIO_MIN   3.5f
-#define S_RATIO_MIN   4.5f
+// S floor lowered 4.5 -> 3.5 so the (larger) S arrival reliably clears the bar
+// — at 4.5 the gyro often never crossed, so no S was detected, so the S-P time
+// (and therefore the distance estimate) never populated even on a clean shaker
+// run with an obvious P-gap-S structure.
+#define S_RATIO_MIN   3.5f
+// Below this merged STA/LTA the signal is considered "quiet" — used to detect
+// the gap between the P coda and the S arrival.
+#define QUIET_RATIO   1.8f
 
 // ----------------------------------------------------------------
 //  Real-vibration gate (calibration)
@@ -642,6 +649,11 @@ unsigned long pWaveTime     = 0;
 unsigned long sWaveTime     = 0;
 bool          pWaveDetected = false;
 bool          sWaveDetected = false;
+// True once the signal has gone quiet after the P arrival — i.e. the P-S gap.
+// A renewed strong arrival after this is the S wave (the classic P-gap-S shape
+// the shaker produces), which lets distance populate even if the gyro channel
+// alone never crosses the S threshold.
+bool          gapAfterP    = false;
 
 // ----------------------------------------------------------------
 //  System state
@@ -2672,17 +2684,32 @@ void loop() {
 
   // ── P / S wave detection ───────────────────────────────────────
   // P-wave: first accelerometer arrival clearing the adaptive trigger AND the
-  // absolute P_RATIO_MIN floor. S-wave: a later, larger arrival on the gyro
-  // that must clear the higher S_RATIO_MIN, so one noisy axis can't be
-  // mislabelled as an S. Both still require the confirmed real-vibration gate
-  // (adxlT/lisT/gyroT already fold that in).
+  // absolute P_RATIO_MIN floor.
+  // S-wave: the later, larger arrival. We accept EITHER signature so the S is
+  // reliably caught (and the S-P time → distance actually populates):
+  //   (a) the gyro/transverse channel crosses S_RATIO_MIN (true shear motion), OR
+  //   (b) after the signal has gone quiet (the P-S gap), a renewed strong
+  //       accelerometer arrival appears — the classic P-gap-S shape the shaker
+  //       produces. Requiring the quiet gap first stops the P coda itself being
+  //       mislabelled as the S.
+  float mergedAccelR = (adxlR > lisR) ? adxlR : lisR;
   bool pOnset = (adxlT && adxlR >= P_RATIO_MIN) || (lisT && lisR >= P_RATIO_MIN);
-  bool sOnset = gyroT && gyroR >= S_RATIO_MIN;
 
   if (pOnset && !pWaveDetected) {
     pWaveTime     = millis();
     pWaveDetected = true;
+    gapAfterP     = false;
   }
+
+  // Mark the quiet gap once the P coda dies down (at least 250 ms after P).
+  if (pWaveDetected && !sWaveDetected &&
+      mergedAccelR < QUIET_RATIO && (millis() - pWaveTime) > 250UL) {
+    gapAfterP = true;
+  }
+
+  bool sOnset = (gyroT && gyroR >= S_RATIO_MIN) ||
+                (gapAfterP && mergedAccelR >= S_RATIO_MIN);
+
   if (sOnset && pWaveDetected && !sWaveDetected) {
     sWaveTime     = millis();
     sWaveDetected = true;
@@ -2690,6 +2717,7 @@ void loop() {
   if (pWaveDetected && !sWaveDetected &&
       millis() - pWaveTime > 30000UL) {
     pWaveDetected = false;
+    gapAfterP     = false;
   }
 
   // ── Classification ─────────────────────────────────────────────
@@ -2767,6 +2795,7 @@ void loop() {
     quakeActive   = false;
     pWaveDetected = false;
     sWaveDetected = false;
+    gapAfterP     = false;
     updateAdaptiveStats(adxlR, adxlRatioMean, adxlRatioVar);
     updateAdaptiveStats(lisR,  lisRatioMean,  lisRatioVar);
     updateAdaptiveStats(gyroR, gyroRatioMean, gyroRatioVar);
