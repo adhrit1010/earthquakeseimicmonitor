@@ -968,10 +968,30 @@ float __attribute__((optimize("Os"),noinline)) estimateMagnitude(float pga_cms2,
   return log10f(pga_cms2) + 0.9f;
 }
 
+// ----------------------------------------------------------------
+//  Epicentral distance from the S-minus-P arrival time (single station).
+//
+//  A single station can't triangulate, so the S-P lag is the only physical
+//  distance cue. With crustal velocities Vp, Vs the epicentral distance is:
+//      distance = (S-P seconds) x (Vp*Vs)/(Vp-Vs)
+//  With Vp=6.0, Vs=3.5 km/s that's ~8.4 km per second of S-P lag (the classic
+//  "multiply S-P seconds by ~8" rule). Requires BOTH a P and an S arrival;
+//  returns -1 (unknown) otherwise so the dashboard shows "—" instead of a
+//  fabricated value. Guards the unsigned-time subtraction and clamps absurd
+//  results.
+// ----------------------------------------------------------------
+#define VP_KM_PER_S      6.0f
+#define VS_KM_PER_S      3.5f
+#define MAX_DISTANCE_KM  2000.0f
+
 float __attribute__((optimize("Os"),noinline)) estimateDistance() {
   if (!pWaveDetected || !sWaveDetected) return -1.0f;
-  float dt = (sWaveTime - pWaveTime) / 1000.0f;
-  return dt * (6.0f * 3.5f) / (6.0f - 3.5f);
+  if (sWaveTime <= pWaveTime) return -1.0f;            // guard unsigned underflow
+  float dt = (sWaveTime - pWaveTime) / 1000.0f;        // S-P time, seconds
+  float dist = dt * (VP_KM_PER_S * VS_KM_PER_S) / (VP_KM_PER_S - VS_KM_PER_S);
+  if (dist <= 0.0f) return -1.0f;
+  if (dist > MAX_DISTANCE_KM) dist = MAX_DISTANCE_KM;  // clamp implausible values
+  return dist;
 }
 
 void __attribute__((optimize("Os"),noinline)) classifyEvent(bool adxlT, bool lisT, bool gyroT, char* out, size_t sz) {
