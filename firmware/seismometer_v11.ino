@@ -117,7 +117,7 @@
 //    Adafruit Unified Sensor
 //    MPU6050 by Electronic Cats
 //    arduinoFFT (v2 — ArduinoFFT<float> template API)
-//    BluetoothSerial (built-in with ESP32 Arduino core)
+//    ESP32 BLE Arduino (BLEDevice/BLEServer — built-in with ESP32 core)
 //    WiFi, WebServer, WiFiClientSecure, HTTPClient (built-in)
 //  Board setting: Tools -> PSRAM -> Disabled
 // ================================================================
@@ -133,13 +133,18 @@
 #include <HTTPClient.h>
 #include <math.h>
 #include <arduinoFFT.h>
-#include "BluetoothSerial.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
+// Motor control moved from Classic Bluetooth (SPP) to BLE: Classic BT's
+// bluedroid stack consumed ~86 KB of heap, starving the TLS uploader (which
+// needs a contiguous ~16 KB record buffer) so nothing uploaded. BLE's
+// footprint is far smaller, freeing ~50 KB and letting WiFi + TLS + BLE coexist.
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include "esp_bt.h"          // esp_bt_controller_mem_release (free Classic RAM)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "esp_bt_device.h"   // esp_bt_controller_get_status()
 
 // ----------------------------------------------------------------
 //  IRAM OVERFLOW FIX — per-function attributes (revision 8)
@@ -322,24 +327,17 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define HEAP_GUARD 18000
 
 // ----------------------------------------------------------------
-//  Free unused BLE controller memory (HEAP RECOVERY)
+//  Free unused Classic-BT controller memory (HEAP RECOVERY)
 //
-//  Serial logs showed free heap collapsing to ~6 KB after BT + WiFi init,
-//  which starves TLS uploads (need ~30-40 KB), the BT SPP socket, and even
-//  WiFi association — the single root cause behind "uploads slow / no data",
-//  "Bluetooth socket failure", and "WiFi failed" all at once.
-//
-//  This project uses ONLY Classic Bluetooth (BluetoothSerial / SPP) for motor
-//  control — never BLE. esp_bt_controller_mem_release(ESP_BT_MODE_BLE), called
-//  before the controller starts, permanently hands the BLE-only RAM (~30-40 KB)
-//  back to the heap. That's usually enough to get TLS + WiFi + SPP all fitting.
-//
-//  If your Arduino board config builds the controller in dual-mode (BTDM) and
-//  BT then refuses to start, set this to 0 (and prefer a "BR/EDR only" /
-//  Classic-only BT build in Tools/sdkconfig, which both shrinks the controller
-//  and makes this release safe).
+//  Motor control now uses BLE only (see the include note above), so the
+//  Classic (BR/EDR) controller RAM is dead weight. Releasing it before the BLE
+//  controller starts hands ~30-40 KB back to the heap — on top of the ~50 KB
+//  already saved by dropping the Classic bluedroid stack — so WiFi + TLS + BLE
+//  fit comfortably and uploads actually run. The ESP32 Arduino BLE library
+//  brings the controller up in BLE-only mode, so releasing the Classic half is
+//  safe. Set to 0 only if BLE refuses to start on your board.
 // ----------------------------------------------------------------
-#define FREE_BLE_MEMORY 1
+#define FREE_CLASSIC_BT_MEMORY 1
 
 // ----------------------------------------------------------------
 //  On-device web server (HEAP)
@@ -427,7 +425,124 @@ Adafruit_ADXL345_Unified  adxl = Adafruit_ADXL345_Unified(12345);
 Adafruit_LIS3DH           lis  = Adafruit_LIS3DH();
 MPU6050                   mpu;
 WebServer                 server(80);
-BluetoothSerial           BT;
+
+// ----------------------------------------------------------------
+//  BLE motor-control link (replaces Classic Bluetooth SPP)
+//
+//  Uses the Nordic UART Service (NUS) UUIDs so any "BLE UART" app — nRF
+//  Connect, Serial Bluetooth Terminal (BLE mode), etc. — recognises it. The
+//  same motor commands work (? / s / 0 / 1-9 / p<pwm> / f<hz>); you now send
+//  them by writing to the RX characteristic, and replies arrive as TX notifies.
+//
+//  `BT` below is a Print-derived shim so every existing BT.print()/println()
+//  and BT.available()/read() call keeps working unchanged — only the transport
+//  is now BLE instead of SPP.
+// ----------------------------------------------------------------
+#define BLE_DEVICE_NAME   "TremorLab"
+#define BLE_SERVICE_UUID  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BLE_CHAR_RX_UUID  "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  // app -> device (write)
+#define BLE_CHAR_TX_UUID  "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  // device -> app (notify)
+
+volatile bool bleConnected = false;
+
+// Lock-free single-producer/single-consumer ring buffer for inbound command
+// bytes. Producer = BLE write callback (BLE task, Core 0); consumer =
+// checkBluetooth() (loop, Core 1). volatile head/tail make this safe across
+// cores without a mutex, the way Classic BluetoothSerial buffered internally.
+#define BLE_RX_RING 160
+static volatile char bleRxRing[BLE_RX_RING];
+static volatile int  bleRxHead = 0, bleRxTail = 0;
+
+class BLESerial : public Print {
+ public:
+  BLECharacteristic* txChar = nullptr;
+  String lineBuf;                       // TX is written only from Core 1 (loop)
+
+  void attachTx(BLECharacteristic* c) { txChar = c; }
+
+  // TX: accumulate a line, then push it out as 20-byte BLE notify chunks.
+  size_t write(uint8_t c) override {
+    Serial.write(c);                    // always mirror to USB serial
+    lineBuf += (char)c;
+    if (c == '\n' || lineBuf.length() >= 180) flushLine();
+    return 1;
+  }
+  size_t write(const uint8_t* buf, size_t n) override {
+    for (size_t i = 0; i < n; i++) write(buf[i]);
+    return n;
+  }
+  void flushLine() {
+    if (txChar && bleConnected && lineBuf.length()) {
+      const char* p = lineBuf.c_str();
+      int len = (int)lineBuf.length();
+      for (int off = 0; off < len; off += 20) {
+        int n = (len - off < 20) ? (len - off) : 20;
+        txChar->setValue((uint8_t*)(p + off), n);
+        txChar->notify();
+        delay(6);                       // let the BLE stack drain each chunk
+      }
+    }
+    lineBuf = "";
+  }
+
+  // RX: consumed by checkBluetooth() exactly like the old SPP API.
+  int available() { return (bleRxHead - bleRxTail + BLE_RX_RING) % BLE_RX_RING; }
+  int read() {
+    if (bleRxHead == bleRxTail) return -1;
+    char c = bleRxRing[bleRxTail];
+    bleRxTail = (bleRxTail + 1) % BLE_RX_RING;
+    return (int)c;
+  }
+};
+
+BLESerial BT;
+
+// Inbound write -> push bytes into the ring, delimited with '\n' so
+// parseBTCommand fires even when the app writes a command without a newline.
+class BLERxCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override {
+    uint8_t* d = c->getData();
+    size_t   len = c->getLength();
+    for (size_t i = 0; i < len; i++) {
+      int next = (bleRxHead + 1) % BLE_RX_RING;
+      if (next != bleRxTail) { bleRxRing[bleRxHead] = (char)d[i]; bleRxHead = next; }
+    }
+    int next = (bleRxHead + 1) % BLE_RX_RING;
+    if (next != bleRxTail) { bleRxRing[bleRxHead] = '\n'; bleRxHead = next; }
+  }
+};
+
+class BLEConnCallback : public BLEServerCallbacks {
+  void onConnect(BLEServer*) override { bleConnected = true; }
+  void onDisconnect(BLEServer*) override {
+    bleConnected = false;
+    BLEDevice::startAdvertising();      // re-advertise so it can reconnect
+  }
+};
+
+static void __attribute__((optimize("Os"),noinline)) initBLE() {
+  BLEDevice::init(BLE_DEVICE_NAME);
+  BLEServer* srv = BLEDevice::createServer();
+  srv->setCallbacks(new BLEConnCallback());
+
+  BLEService* svc = srv->createService(BLE_SERVICE_UUID);
+
+  BLECharacteristic* tx = svc->createCharacteristic(
+      BLE_CHAR_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  tx->addDescriptor(new BLE2902());
+  BT.attachTx(tx);
+
+  BLECharacteristic* rx = svc->createCharacteristic(
+      BLE_CHAR_RX_UUID,
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  rx->setCallbacks(new BLERxCallback());
+
+  svc->start();
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(BLE_SERVICE_UUID);
+  adv->setScanResponse(true);
+  BLEDevice::startAdvertising();
+}
 
 bool adxlOk = true;
 bool lisOk  = true;
@@ -2110,62 +2225,18 @@ void setup() {
   // ── I2C ──────────────────────────────────────────────────────
   Wire.begin(I2C_SDA, I2C_SCL);
 
-  // ── Bluetooth — guarantee a clean stack, then begin (PERMANENT fix) ──
-  //
-  // ROOT CAUSE of "Bluetooth socket failure": after a soft-reset, watchdog
-  // reboot or a re-flash (anything short of a full power cycle), the BT
-  // controller and/or the bluedroid host stack are left in an INITED/ENABLED
-  // state from the previous run. BluetoothSerial::begin() then tries to
-  // (re)initialise them — esp_bluedroid_init() / esp_spp_start_srv() return
-  // ESP_ERR_INVALID_STATE — and the SPP server socket is never opened. Only a
-  // power cycle cleared it.
-  //
-  // Earlier revisions tried to *pre-init* the controller and skip if it was up.
-  // That only patched the controller layer (not bluedroid/SPP) and could itself
-  // leave a half-initialised stack. The permanent fix is the opposite: if the
-  // stack is not already IDLE, fully tear bluedroid + controller down so
-  // begin() ALWAYS starts from the same clean slate a cold boot would give it.
-  // Each teardown call is a harmless no-op (returns INVALID_STATE, ignored) for
-  // a layer that isn't currently up. Teardown order = reverse of init.
-  if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
-    Serial.println(F("BT stack not IDLE at boot (soft reset) — clean teardown..."));
-    esp_bluedroid_disable();
-    esp_bluedroid_deinit();
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
-    delay(100);
-  }
-
-#if FREE_BLE_MEMORY
-  // Hand the unused BLE-only controller RAM (~30-40 KB) back to the heap before
-  // the Classic controller starts. This is the main heap-recovery step — with
-  // it, TLS uploads, WiFi association and the BT SPP socket all have room.
-  // Must be done while the controller is IDLE (it now is, after the teardown).
-  esp_err_t bleRel = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
-  Serial.printf("BLE mem release: %s | heap now %u\n",
-                esp_err_to_name(bleRel), (unsigned)ESP.getFreeHeap());
+  // ── BLE motor-control link (replaces Classic Bluetooth SPP) ──
+  // Free the now-unused Classic (BR/EDR) controller RAM first, then start BLE.
+  // The BLE stack is far lighter than Classic bluedroid, which is what frees
+  // the heap the TLS uploader needs.
+#if FREE_CLASSIC_BT_MEMORY
+  esp_err_t clsRel = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+  Serial.printf("Classic BT mem release: %s | heap now %u\n",
+                esp_err_to_name(clsRel), (unsigned)ESP.getFreeHeap());
 #endif
-
-  // begin() now owns the full, clean initialisation from IDLE. The retry (with
-  // another full teardown) covers the rare case where the first teardown didn't
-  // fully settle before begin() ran.
-  bool btOk = BT.begin("TremorLab");
-  if (!btOk) {
-    Serial.println(F("BT.begin() failed — full teardown + retry..."));
-    BT.end();
-    esp_bluedroid_disable();
-    esp_bluedroid_deinit();
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
-    delay(200);
-    btOk = BT.begin("TremorLab");
-  }
-  if (btOk) {
-    Serial.println(F("Bluetooth ready — pair as 'TremorLab'"));
-  } else {
-    Serial.println(F("Bluetooth FAILED to start — continuing without BT motor control."));
-  }
-  Serial.print(F("Heap after BT: ")); Serial.println(ESP.getFreeHeap());
+  initBLE();
+  Serial.println(F("BLE ready — connect to 'TremorLab' (BLE UART) for motor commands."));
+  Serial.print(F("Heap after BLE: ")); Serial.println(ESP.getFreeHeap());
 
   // ── ADC setup for battery voltage measurement ──────────────────
   analogReadResolution(12);
@@ -2320,8 +2391,10 @@ void setup() {
   uint32_t freeNow = ESP.getFreeHeap();
   if (freeNow < 40000) {
     Serial.printf("*** LOW HEAP WARNING: %u bytes free. TLS uploads need ~30-40 KB. ***\n", freeNow);
-    Serial.println(F("    Classic Bluetooth is the main consumer. FREE_BLE_MEMORY is "
-                     "on; if still low, use a BR/EDR-only BT build or move motor control to BLE."));
+    Serial.println(F("    Motor control is on BLE now (Classic BT dropped). If still low, "
+                     "set ENABLE_LOCAL_WEBSERVER 0 and check for other large allocations."));
+  } else {
+    Serial.println(F("    Heap looks healthy for TLS uploads."));
   }
 
   // ── FreeRTOS upload queue ─────────────────────────────────────
