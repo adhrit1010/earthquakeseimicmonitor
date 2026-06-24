@@ -886,128 +886,122 @@ def summarize_events(
     }
 
 
+def _mmi_meaning(mmi: float) -> str:
+    """Plain-language feel for a Modified Mercalli Intensity value."""
+    if mmi < 0:
+        return "intensity not reported"
+    table = {
+        1: "not felt — only instruments notice it",
+        2: "barely felt by a few people at rest",
+        3: "felt indoors, like a passing truck",
+        4: "felt by many indoors; dishes and windows rattle",
+        5: "felt by nearly everyone; small objects shift",
+        6: "felt by all; some heavy furniture moves",
+        7: "hard to stand; noticeable in moving cars",
+        8: "severe — chimneys and weak structures damaged",
+    }
+    return table.get(int(round(mmi)), "very strong shaking")
+
+
 def local_agent_answer(
     question: str,
     rows: list[dict[str, Any]],
     summary: dict[str, Any],
 ) -> str:
+    """
+    Offline analyst. Interprets the station's SEISMIC data for the person
+    watching the dashboard — never hands them developer/maintenance to-dos.
+    """
     q = question.lower()
     if not rows:
         return (
-            "Reading: no Supabase events are loaded yet, so there's nothing to analyse.\n"
-            "Suggestion: check the backend .env values (SUPABASE_URL / key), then run a "
-            "shaker sequence on the ESP32 so station_live starts streaming — the dashboard "
-            "will populate within a couple of refresh cycles."
+            "The station isn't reporting any seismic readings right now, so there's nothing "
+            "to interpret yet. As soon as it records ground motion I can tell you how strong "
+            "it is and what the event looks like."
         )
     strongest = summary.get("strongest") or {}
-    if "strong" in q or "peak" in q or "largest" in q:
+    severity = summary.get("severity") or {}
+
+    if "strong" in q or "peak" in q or "largest" in q or "big" in q:
         pga = safe_num(strongest.get("pga"), -1)
-        suggestion = (
-            "Suggestion: open the waveform/oscilloscope trace for this event and confirm a "
-            "clean P-then-S arrival before trusting the magnitude — a high PGA with no P/S "
-            "ordering is usually a local bump, not a quake."
-            if pga >= 80 else
-            "Suggestion: this is modest shaking; if you expected a bigger event, lower the "
-            "STA/LTA threshold slightly or move the simulator closer to the sensors and re-run."
-        )
+        mmi = estimate_mmi(pga) if pga >= 0 else -1
+        sev = (severity.get("label") or "—")
         return (
-            f"Reading: the strongest event is {strongest.get('classification', 'Unknown')} with "
-            f"PGA {fmt_num(strongest.get('pga'), 1, ' cm/s2')}, "
-            f"magnitude {fmt_num(strongest.get('magnitude'), 1)}, "
-            f"and distance {fmt_num(strongest.get('distance_km'), 1, ' km')}.\n{suggestion}"
+            f"The strongest motion this station has recorded is a "
+            f"{strongest.get('classification', 'event')}: peak ground acceleration of "
+            f"{fmt_num(strongest.get('pga'), 1, ' cm/s2')}, an estimated magnitude of "
+            f"{fmt_num(strongest.get('magnitude'), 1)} from about "
+            f"{fmt_num(strongest.get('distance_km'), 1, ' km')} away. "
+            f"That's {sev.lower()} shaking — at intensity {_mmi_meaning(mmi)}."
         )
-    if "validation" in q or "error" in q:
+    if "validation" in q or "error" in q or "confiden" in q or "trust" in q:
         err = summary.get("avgValidationError")
         if err is None:
             return (
-                "Reading: there are no validation-error values yet (they need a P-wave AND an "
-                "S-wave to be detected on the same event).\n"
-                "Suggestion: run a full shaker sequence (send 's' over Bluetooth) so the P/S "
-                "gap is captured, then re-ask — that's what populates this field."
+                "There isn't a confidence/validation figure for these readings yet — that "
+                "number appears once an event has both a P-wave and an S-wave arrival to "
+                "cross-check. For now I'd read the events as indicative rather than precise."
             )
         if err > 25:
-            suggestion = (
-                "Suggestion: that's above the 25% usable line — tune the motor timing and the "
-                "P/S detection thresholds, and re-check sensor mounting for slack before the "
-                "next run."
-            )
+            quality = "fairly rough, so treat the magnitude and distance as ballpark figures"
         elif err > 15:
-            suggestion = (
-                "Suggestion: usable but not tight — a small motor-timing trim or firmer sensor "
-                "mounting should pull it under 15%."
-            )
+            quality = "reasonable — the size and timing are trustworthy to within a notch"
         else:
-            suggestion = "Suggestion: that's already excellent; keep the current setup and log more runs to confirm it's stable."
-        return f"Reading: average validation error is {err:.1f}%.\n{suggestion}"
-    if "threshold" in q or "tune" in q:
-        agreement = summary.get("sensorAgreement") or {}
-        score = agreement.get("agreementScore")
-        focus = ""
-        if isinstance(score, (int, float)):
-            focus = (
-                f" Current sensor agreement is {score:.0f}%, so the three axes are tracking "
-                "well — tune them as a group."
-                if score >= 70 else
-                f" Current sensor agreement is only {score:.0f}%, so start with whichever sensor's "
-                "ratio diverges most from the other two."
-            )
+            quality = "tight, so you can take the magnitude and distance at face value"
         return (
-            "Reading: thresholds are adaptive (mean + k·σ of the STA/LTA ratio per sensor)." + focus + "\n"
-            "Suggestion: change one sensor at a time — raise its threshold if footsteps trigger "
-            "false events, lower it if the simulator is missed — and watch the ADXL345/LIS3DH/"
-            "MPU6050 ratios converge before touching the next."
+            f"The station's readings carry about {err:.1f}% validation error, which means the "
+            f"numbers are {quality}."
         )
-    if "agreement" in q or "agree" in q:
+    if "agree" in q or "sensor" in q or "correlat" in q:
         agreement = summary.get("sensorAgreement") or {}
         if not agreement.get("available"):
-            sample_size = agreement.get("sampleSize", 0)
             return (
-                f"Reading: sensor agreement isn't available yet — it needs at least 3 rows with "
-                f"all three STA/LTA channels and currently has {sample_size}.\n"
-                "Suggestion: if you're only seeing earthquake_history rows, confirm the v11 "
-                "firmware and schema include adxl345_stalta/lis3dh_stalta/mpu6050_stalta on "
-                "confirmed events; station_live rows already carry the *_ratio and *_score fields."
+                "I can't compare the three sensors against each other yet — there isn't enough "
+                "overlapping data. Once all three are reporting together I can tell you whether "
+                "a wobble is real ground motion or just one noisy sensor."
             )
-        score  = agreement.get("agreementScore")
-        method = agreement.get("method", "unknown")
-        suggestion = (
-            "Suggestion: agreement is high — treat a multi-sensor spike as a genuine event and "
-            "trust the merged trace."
-            if score >= 70 else
-            "Suggestion: agreement is low — check that all three sensors are mounted to the same "
-            "rigid surface and re-calibrate; divergence usually means one sensor is loose or noisy."
-        )
-        return (
-            f"Reading: sensor agreement is {score:.0f}% "
-            f"(method: {method}, n={agreement.get('sampleSize')}) — higher means the three "
-            f"sensors are tracking the same shaking pattern.\n{suggestion}"
-        )
-    if "health" in q or "system" in q:
+        score = agreement.get("agreementScore")
+        if score >= 70:
+            read = (
+                "they're moving together, which is the signature of genuine ground motion rather "
+                "than a local bump or sensor noise — you can trust what the trace is showing."
+            )
+        else:
+            read = (
+                "they're not tracking each other closely, so recent wobbles are more likely "
+                "local/instrumental than true shaking passing through the whole station."
+            )
+        return f"The three sensors are in about {score:.0f}% agreement right now — {read}"
+    if "health" in q or "system" in q or "status" in q:
         health = system_health_score(rows)
         if health is None:
             return (
-                "Reading: no system-health data is available yet (needs station_live rows from "
-                "v7+ firmware).\n"
-                "Suggestion: confirm the ESP32 is uploading live frames — once it is, WiFi RSSI, "
-                "free heap, CPU load and cloud-sync rate will drive this score."
+                "The station isn't reporting its live status right now, so I can't tell you how "
+                "it's doing — but the seismic readings you have are still valid to read."
             )
-        suggestion = (
-            "Suggestion: health is strong; no action needed beyond keeping the station powered and online."
-            if health >= 70 else
-            "Suggestion: health is low — check WiFi signal (RSSI), free heap, and cloud-sync success "
-            "rate; a weak link or heap pressure is the usual cause."
-        )
-        return f"Reading: system health score is {health:.0f}%.\n{suggestion}"
-    if "summary" in q or "summarize" in q:
-        return (
-            f"Reading: loaded {summary['count']} events; peak PGA {summary['peakPga']:.1f} cm/s2, "
-            f"max magnitude {summary['maxMagnitude']:.1f}, data quality {summary['qualityScore']:.0f}%.\n"
-            f"Suggestion: {summary['suggestedAction']}"
-        )
+        state = ("running cleanly and reporting reliably" if health >= 70
+                 else "reporting, but its live link looks a little strained")
+        return f"The station is {state} (health around {health:.0f}%)."
+    if "summary" in q or "summarize" in q or "overview" in q or "happening" in q:
+        peak = summary.get("peakPga")
+        mag = summary.get("maxMagnitude")
+        sev = (severity.get("label") or "—")
+        bits = [f"Across {summary['count']} recorded events"]
+        if peak is not None:
+            bits.append(f"the strongest shaking reached {peak:.1f} cm/s2 ({sev.lower()})")
+        if mag is not None:
+            bits.append(f"with magnitudes up to about {mag:.1f}")
+        confirmed = summary.get("classCounts", {}).get("Confirmed Seismic Event", 0)
+        tail = (f" {confirmed} of them look like confirmed seismic events."
+                if confirmed else " none rise to a confirmed multi-sensor seismic event so far.")
+        return ", ".join(bits) + "." + tail
+    # Default: a short seismic narrative.
+    sev = (severity.get("label") or "—")
     return (
-        f"Reading: I found {summary['count']} events in the current window.\n"
-        f"Suggestion: {summary['suggestedAction']} You can also ask about the strongest event, "
-        "validation error, sensor agreement, system health, or threshold tuning for a focused readout."
+        f"Right now the station has {summary['count']} recorded events, with the strongest "
+        f"reaching {fmt_num(summary.get('peakPga'), 1, ' cm/s2')} ({sev.lower()} shaking). "
+        "Ask me about the strongest event, how the sensors compare, how much to trust the "
+        "readings, or what's happening overall."
     )
 
 
@@ -1042,15 +1036,18 @@ def gemini_agent_answer(
         return local_agent_answer(question, rows, summary)
 
     system_instruction = (
-        "You are TriAxis Station Analyst, a knowledgeable and helpful seismic "
-        "monitoring assistant for a 3-sensor ESP32 station (ADXL345, LIS3DH, MPU6050). "
-        "You have the station's current data as context, but you are NOT restricted to it — "
-        "answer the user's question fully and naturally, drawing on your own seismology and "
-        "instrumentation knowledge whenever it helps, and offer your own analysis, "
-        "interpretation, and suggestions freely. "
-        "Use the station data when it's relevant and cite real numbers from it; if a numeric "
-        "field is -1 or null, treat it as 'not reported yet' rather than a real negative value. "
-        "Be clear, practical and conversational — no rigid template required."
+        "You are TriAxis Station Analyst, speaking to the person watching this seismic "
+        "station's dashboard — an observer, not a developer. Use the station's current data "
+        "as your context and interpret the SEISMIC readings for them in clear, engaging "
+        "language: how strong any shaking is, what an event looks like (P/S arrivals, "
+        "duration, distance, magnitude, Mercalli intensity), how the three sensors compare, "
+        "and what the current state or trend suggests. Be generative, curious and insightful "
+        "about the seismic data, and weave in relevant seismology context to make it "
+        "understandable and interesting. "
+        "Do NOT hand the user engineering or maintenance to-dos — never tell them to tune "
+        "thresholds, check wiring or mounting, run a simulator, or change firmware/settings. "
+        "Stay entirely on interpreting what the station is sensing. If a numeric field is -1 "
+        "or null, treat it as 'not reported yet' rather than a real value."
     )
     user_prompt = (
         f"Question: {question}\n\nStation data JSON:\n{compact_context(rows, summary)}"
