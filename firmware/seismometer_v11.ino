@@ -365,8 +365,14 @@ const char* password = "YOUR_WIFI_PASSWORD";
 //                   protects against the occasional slow request.
 //  EVENT_QUEUE_LEN: up to 4 event/waveform pairs queued.
 // ----------------------------------------------------------------
-#define LIVE_QUEUE_LEN    4
-#define EVENT_QUEUE_LEN   4
+//  HEAP/FRAGMENTATION FIX: cut 4+4 -> 2+2. Each UploadMessage slot is ~1.4 KB,
+//  so 8 slots is an ~11 KB CONTIGUOUS block sitting in the middle of the heap —
+//  a major reason the largest free block fell below the ~16 KB a TLS handshake
+//  needs (uploads failed with "largest_block < 17 KB"). 2+2 is plenty: live
+//  frames upload in ~150 ms and are produced every 500 ms, so the queue never
+//  backs up past 1-2 items in steady state. Frees ~5.6 KB and de-fragments.
+#define LIVE_QUEUE_LEN    2
+#define EVENT_QUEUE_LEN   2
 
 // ----------------------------------------------------------------
 //  Upload payload types passed through the queue
@@ -2478,31 +2484,24 @@ void setup() {
     while (true) delay(1000);
   }
 
-  // ── Upload task on Core 0, stack 12 KB, priority 2 ───────────
-  // Core 1 runs the Arduino loop (sensor + BT + shaker + web server).
-  // Core 0 runs only the WiFi/BT stack + this upload task.
+  // ── Upload task on Core 0 ────────────────────────────────────
+  // Core 1 runs the Arduino loop (sensor + BLE + shaker). Core 0 runs the
+  // WiFi/BLE stack + this upload task.
   //
-  // FIX: stack raised from 8192 → 12288.
-  //   WiFiClientSecure TLS buffers alone consume ~6 KB of stack.
-  //   Add HTTPClient local state, supabaseRequest locals, and the
-  //   192-byte URL buffer and 8192 was regularly overflowing silently,
-  //   corrupting TLS state and causing the persistent connection to die
-  //   mid-stream. 12 KB gives comfortable headroom.
+  // STACK 8 KB (was 12 KB): the runtime stack high-water-mark watchdog showed
+  // peak usage of only ~2.9 KB — i.e. WiFiClientSecure's TLS record buffers
+  // live on the HEAP, not this stack, so 12 KB was ~9 KB of wasted, heap-
+  // fragmenting RAM. 8 KB leaves >5 KB margin over the measured peak and frees
+  // 4 KB back to the heap (which is what TLS needs a contiguous block of).
   //
-  // FIX: priority raised from 1 → 2.
-  //   The Arduino loop() runs at FreeRTOS priority 1. With uploadTask
-  //   also at priority 1, the FreeRTOS scheduler round-robins them,
-  //   meaning the upload task only gets CPU when loop() yields (only
-  //   at delay(10) and xQueueReceive). Raising to priority 2 lets the
-  //   upload task preempt loop() immediately when a queue item arrives,
-  //   so uploads happen in the 10 ms window between sensor samples
-  //   rather than queuing up behind them.
+  // Priority 2 so the uploader preempts loop() immediately when a queue item
+  // arrives (loop() runs at priority 1).
   xTaskCreatePinnedToCore(
     uploadTask,       // function
     "uploadTask",     // name
-    12288,            // stack bytes (was 8192 — too small for TLS + HTTPClient)
+    8192,             // stack bytes (12288 -> 8192; watchdog proved ~2.9 KB peak)
     nullptr,          // param
-    2,                // priority (was 1 — raised so uploader preempts sensor loop)
+    2,                // priority
     &uploadTaskHandle,// task handle — used for stack high-water-mark monitoring
     0                 // Core 0
   );
