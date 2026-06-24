@@ -237,14 +237,28 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define SUPABASE_STATION_ID "TX-01"
 
 // ----------------------------------------------------------------
-//  STA/LTA detection
+//  STA/LTA detection (P/S threshold tuning)
+//
+//  At 100 Hz: STA_LEN = 10 -> 0.1 s short-term window (fast P-wave onset
+//  response); LTA_LEN = 80 -> 0.8 s long-term background. The LTA was raised
+//  50 -> 80 so the background energy estimate is steadier — a short LTA reacts
+//  to the event itself and depresses the ratio, hiding the S-wave and causing
+//  flutter near the threshold. 80 stays within BUFFER_SIZE (100) and gives a
+//  cleaner ~8:1 STA:LTA separation.
 // ----------------------------------------------------------------
 #define STA_LEN       10
-#define LTA_LEN       50
+#define LTA_LEN       80
 // Raised 2.5 -> 3.5: a real seismic arrival pushes STA/LTA well past 3x.
 // At 2.5 every door slam, footstep and air gust crossed the line. 3.5 keeps
 // genuine events while rejecting most ambient/handling noise.
 #define RATIO_THRESH  3.5f
+
+// Separate P/S onset thresholds layered on top of the adaptive threshold.
+// P-wave (first, weaker arrival) uses the adaptive threshold as-is; the S-wave
+// (larger, later) must clear a higher bar so a single noisy axis can't be
+// mislabelled as an S arrival. Used in the P/S detection block in loop().
+#define P_RATIO_MIN   3.5f
+#define S_RATIO_MIN   4.5f
 
 // ----------------------------------------------------------------
 //  Real-vibration gate (calibration)
@@ -448,6 +462,15 @@ int webWaveIndex = 0, webWaveCount = 0;
 // ----------------------------------------------------------------
 float adxlBaseX, adxlBaseY, adxlBaseZ;
 float  lisBaseX,  lisBaseY,  lisBaseZ;
+// MPU6050 gyro bias — previously uncalibrated, so the gyro channel started
+// with a constant offset that the drift filter had to chase, skewing its early
+// STA/LTA. Measured at rest and subtracted, like the accel baselines.
+float gyroBaseX, gyroBaseY, gyroBaseZ;
+// Per-sensor rest-noise (RMS of the conditioned magnitude at rest), measured
+// during calibration. Printed for troubleshooting (a near-zero value means a
+// sensor is reading flat/stuck; wildly different values mean inconsistent
+// sensitivity) and used to seed each sensor's adaptive STA/LTA baseline.
+float adxlRestNoise = 0.0f, lisRestNoise = 0.0f, gyroRestNoise = 0.0f;
 
 // ----------------------------------------------------------------
 //  Signal conditioning state
@@ -2125,7 +2148,14 @@ void setup() {
     adxlOk = false;
   } else {
     adxl.setRange(ADXL345_RANGE_2_G);
-    Serial.println(F("ADXL345 OK"));
+    // Set the output data rate explicitly to 100 Hz to match the sample loop.
+    // The ADXL345 powers up at a low default ODR; if it isn't sampling at the
+    // loop rate, getEvent() returns the SAME value repeatedly, the conditioned
+    // signal flattens to ~0, and its STA/LTA ratio (hence its sensor score)
+    // collapses toward 0 — exactly the "ADXL score 0.022" symptom. 100 Hz ODR
+    // gives a fresh sample every loop so the channel responds like the others.
+    adxl.setDataRate(ADXL345_DATARATE_100_HZ);
+    Serial.println(F("ADXL345 OK (range 2g, ODR 100 Hz)"));
   }
 
   if (!lis.begin(0x19)) {
@@ -2145,10 +2175,14 @@ void setup() {
     Serial.println(F("MPU6050 OK"));
   }
 
-  // ── Calibration ───────────────────────────────────────────────
-  Serial.println(F("Calibrating — keep board still for 3 seconds..."));
-  float sx = 0, sy = 0, sz = 0, lx = 0, ly = 0, lz = 0;
-  for (int i = 0; i < 100; i++) {
+  // ── Calibration — all three sensors, two passes ───────────────
+  // Pass 1: per-axis baseline/bias (accel gravity vector + gyro bias).
+  // Pass 2: rest-noise RMS of each conditioned channel, for troubleshooting
+  //         and to confirm the three sensors are producing consistent output.
+  Serial.println(F("Calibrating — keep board still for ~5 seconds..."));
+  const int CAL_N = 150;
+  float sx = 0, sy = 0, sz = 0, lx = 0, ly = 0, lz = 0, gx = 0, gy = 0, gz = 0;
+  for (int i = 0; i < CAL_N; i++) {
     if (adxlOk) {
       sensors_event_t e;
       adxl.getEvent(&e);
@@ -2158,15 +2192,60 @@ void setup() {
       lis.read();
       lx += lis.x_g; ly += lis.y_g; lz += lis.z_g;
     }
-    delay(30);
+    if (mpuOk) {
+      int16_t ax, ay, az, rgx, rgy, rgz;
+      mpu.getMotion6(&ax, &ay, &az, &rgx, &rgy, &rgz);
+      gx += rgx / 131.0f; gy += rgy / 131.0f; gz += rgz / 131.0f;
+    }
+    delay(20);
   }
-  adxlBaseX = adxlOk ? sx / 100.0f : 0.0f;
-  adxlBaseY = adxlOk ? sy / 100.0f : 0.0f;
-  adxlBaseZ = adxlOk ? sz / 100.0f : 0.0f;
-  lisBaseX  = lisOk  ? lx / 100.0f : 0.0f;
-  lisBaseY  = lisOk  ? ly / 100.0f : 0.0f;
-  lisBaseZ  = lisOk  ? lz / 100.0f : 0.0f;
-  Serial.println(F("Calibration done."));
+  adxlBaseX = adxlOk ? sx / CAL_N : 0.0f;
+  adxlBaseY = adxlOk ? sy / CAL_N : 0.0f;
+  adxlBaseZ = adxlOk ? sz / CAL_N : 0.0f;
+  lisBaseX  = lisOk  ? lx / CAL_N : 0.0f;
+  lisBaseY  = lisOk  ? ly / CAL_N : 0.0f;
+  lisBaseZ  = lisOk  ? lz / CAL_N : 0.0f;
+  gyroBaseX = mpuOk  ? gx / CAL_N : 0.0f;
+  gyroBaseY = mpuOk  ? gy / CAL_N : 0.0f;
+  gyroBaseZ = mpuOk  ? gz / CAL_N : 0.0f;
+
+  // Pass 2: rest-noise RMS of each baseline-subtracted magnitude.
+  float adxlSq = 0, lisSq = 0, gyroSq = 0;
+  for (int i = 0; i < CAL_N; i++) {
+    if (adxlOk) {
+      sensors_event_t e; adxl.getEvent(&e);
+      float dx = e.acceleration.x - adxlBaseX;
+      float dy = e.acceleration.y - adxlBaseY;
+      float dz = e.acceleration.z - adxlBaseZ;
+      float m = sqrtf(dx*dx + dy*dy + dz*dz) / 9.81f;
+      adxlSq += m * m;
+    }
+    if (lisOk) {
+      lis.read();
+      float dx = lis.x_g - lisBaseX, dy = lis.y_g - lisBaseY, dz = lis.z_g - lisBaseZ;
+      float m = sqrtf(dx*dx + dy*dy + dz*dz);
+      lisSq += m * m;
+    }
+    if (mpuOk) {
+      int16_t ax, ay, az, rgx, rgy, rgz;
+      mpu.getMotion6(&ax, &ay, &az, &rgx, &rgy, &rgz);
+      float dx = rgx/131.0f - gyroBaseX, dy = rgy/131.0f - gyroBaseY, dz = rgz/131.0f - gyroBaseZ;
+      float m = sqrtf(dx*dx + dy*dy + dz*dz);
+      gyroSq += m * m;
+    }
+    delay(20);
+  }
+  adxlRestNoise = adxlOk ? sqrtf(adxlSq / CAL_N) : 0.0f;
+  lisRestNoise  = lisOk  ? sqrtf(lisSq  / CAL_N) : 0.0f;
+  gyroRestNoise = mpuOk  ? sqrtf(gyroSq / CAL_N) : 0.0f;
+
+  Serial.println(F("Calibration done. Per-sensor REST NOISE (RMS):"));
+  Serial.printf("  ADXL345: %.5f g   LIS3DH: %.5f g   MPU6050: %.5f dps\n",
+                (double)adxlRestNoise, (double)lisRestNoise, (double)gyroRestNoise);
+  // Troubleshooting hint: a near-zero ADXL rest-noise means it's reading flat
+  // (ODR/wiring) rather than truly quiet — that's what crushes its sensor score.
+  if (adxlOk && adxlRestNoise < 0.0005f)
+    Serial.println(F("  ! ADXL345 rest-noise ~0 — likely flat/stuck (check ODR, wiring, I2C)."));
 
   adxlFiltered = lisFiltered = gyroFiltered = 0.0f;
   adxlDrift    = lisDrift    = gyroDrift    = 0.0f;
@@ -2300,9 +2379,9 @@ void loop() {
   if (mpuOk) {
     int16_t ax, ay, az, gx, gy, gz;
     mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    float gxf = gx / 131.0f;
-    float gyf = gy / 131.0f;
-    float gzf = gz / 131.0f;
+    float gxf = gx / 131.0f - gyroBaseX;   // subtract measured gyro bias
+    float gyf = gy / 131.0f - gyroBaseY;
+    float gzf = gz / 131.0f - gyroBaseZ;
     gyroRawMag = sqrtf(gxf*gxf + gyf*gyf + gzf*gzf);
   }
 
@@ -2380,11 +2459,19 @@ void loop() {
   }
 
   // ── P / S wave detection ───────────────────────────────────────
-  if ((adxlT || lisT) && !pWaveDetected) {
+  // P-wave: first accelerometer arrival clearing the adaptive trigger AND the
+  // absolute P_RATIO_MIN floor. S-wave: a later, larger arrival on the gyro
+  // that must clear the higher S_RATIO_MIN, so one noisy axis can't be
+  // mislabelled as an S. Both still require the confirmed real-vibration gate
+  // (adxlT/lisT/gyroT already fold that in).
+  bool pOnset = (adxlT && adxlR >= P_RATIO_MIN) || (lisT && lisR >= P_RATIO_MIN);
+  bool sOnset = gyroT && gyroR >= S_RATIO_MIN;
+
+  if (pOnset && !pWaveDetected) {
     pWaveTime     = millis();
     pWaveDetected = true;
   }
-  if (gyroT && pWaveDetected && !sWaveDetected) {
+  if (sOnset && pWaveDetected && !sWaveDetected) {
     sWaveTime     = millis();
     sWaveDetected = true;
   }
