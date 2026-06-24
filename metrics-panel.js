@@ -13,8 +13,11 @@
    Depends on global `el()` and `fmt()` from app.js (loaded first).
 --------------------------------------------------------------------- */
 
-const NOT_WIRED = '<span class="not-wired">Not wired yet</span>';
-const NOT_DETECTED = '<span class="not-wired">Not detected</span>';
+// Every metric below now has a backend source, so an absent value means "no
+// reading yet" (e.g. no event has occurred), not "unsupported". Show the same
+// em-dash the rest of the dashboard uses rather than the old "Not wired yet".
+const NOT_WIRED = '<span class="not-wired">&mdash;</span>';
+const NOT_DETECTED = '<span class="not-wired">&mdash;</span>';
 
 function metricRow(label, value, unit) {
   const valueHtml = (value === null || value === undefined)
@@ -146,9 +149,14 @@ function renderTimingMetrics(summary, rows) {
   const card = document.getElementById('timingMetricsCard');
   if (!card) return;
   const ref = (summary && summary.strongest) || rows[0] || null;
+  const liveRow = (summary && summary.liveRow) || null;
 
-  const pMs = ref ? Number(ref.p_wave_ms) : null;
-  const sMs = ref ? Number(ref.s_wave_ms) : null;
+  // P/S arrival: prefer the strongest event; fall back to the live row so an
+  // in-progress shaker run still shows its arrivals.
+  const pSource = (ref && Number(ref.p_wave_ms) > 0) ? ref : (liveRow || ref);
+  const sSource = (ref && Number(ref.s_wave_ms) > 0) ? ref : (liveRow || ref);
+  const pMs = pSource ? Number(pSource.p_wave_ms) : null;
+  const sMs = sSource ? Number(sSource.s_wave_ms) : null;
   const hasP = pMs !== null && !Number.isNaN(pMs) && pMs > 0;
   const hasS = sMs !== null && !Number.isNaN(sMs) && sMs > 0;
 
@@ -160,7 +168,10 @@ function renderTimingMetrics(summary, rows) {
   const duration = durationMs !== null && !Number.isNaN(durationMs) && durationMs > 0
     ? (durationMs / 1000).toFixed(2) : null;
 
-  const uptimeMs = ref ? Number(ref.system_uptime_ms) : null;
+  // System uptime lives on the live station row, not on historical event rows —
+  // read it from there so it always shows when the station is streaming.
+  const uptimeSource = (liveRow && Number(liveRow.system_uptime_ms) > 0) ? liveRow : ref;
+  const uptimeMs = uptimeSource ? Number(uptimeSource.system_uptime_ms) : null;
   const hasUptime = uptimeMs !== null && !Number.isNaN(uptimeMs) && uptimeMs > 0;
   const uptime = hasUptime ? formatHms(uptimeMs) : null;
 

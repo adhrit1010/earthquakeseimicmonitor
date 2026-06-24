@@ -781,6 +781,10 @@ def summarize_events(
     agreement_rows = live_for_health if live_for_health else rows
     health = system_health_score(health_rows)
     health_snapshot = station_health_snapshot(live_for_health, health)
+    # Full latest live row, so the frontend can render live-only fields (system
+    # uptime, simulation phase, motor PWM, in-progress P/S timing) that aren't
+    # carried on historical event rows.
+    live_row = live_for_health[0] if live_for_health else None
 
     if not rows:
         agreement = sensor_agreement(agreement_rows)
@@ -804,6 +808,7 @@ def summarize_events(
             "falseTriggerCount": 0,
             "waveform": None,
             "health": health_snapshot,
+            "liveRow": live_row,
         }
 
     class_counts: dict[str, int] = {}
@@ -883,6 +888,7 @@ def summarize_events(
         "falseTriggerCount": false_trigger_count,
         "waveform": waveform,
         "health": health_snapshot,
+        "liveRow": live_row,
     }
 
 
