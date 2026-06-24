@@ -1088,9 +1088,12 @@ def gemini_agent_answer(
 # ---------------------------------------------------------------------------
 
 def get_status() -> dict[str, Any]:
+    gemini_on = bool(GEMINI_API_KEY)
     return {
         "supabaseConfigured": bool(SUPABASE_URL and SUPABASE_KEY),
-        "openaiConfigured": bool(GEMINI_API_KEY),
+        "geminiConfigured": gemini_on,
+        # kept for backward compatibility with any older frontend build
+        "openaiConfigured": gemini_on,
         "model": GEMINI_MODEL,
     }
 
@@ -1124,7 +1127,13 @@ def post_agent(body: dict[str, Any]) -> dict[str, Any]:
     live     = fetch_live_rows()
     summary  = summarize_events(rows, live)
     answer   = gemini_agent_answer(question, rows, summary)
-    return {"answer": answer, "summary": summary, "usedOpenAI": bool(GEMINI_API_KEY)}
+    used_gemini = bool(GEMINI_API_KEY)
+    return {
+        "answer": answer,
+        "summary": summary,
+        "usedGemini": used_gemini,
+        "usedOpenAI": used_gemini,  # backward-compatible alias
+    }
 
 
 # ---------------------------------------------------------------------------

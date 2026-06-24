@@ -5,7 +5,7 @@ three IMUs (ADXL345, LIS3DH, MPU6050) streams detections to Supabase; this app
 reads that data server-side, summarizes it, and serves a live dashboard with an
 AI station analyst you can ask questions like *"what was the strongest event?"*
 
-No Supabase or OpenAI keys are ever sent to the browser — the Python backend is
+No Supabase or Gemini keys are ever sent to the browser — the Python backend is
 the only thing that talks to either service.
 
 ## How it fits together
@@ -55,8 +55,8 @@ for the Vercel deployment path.
    SQL Editor → paste the file → Run). This creates three tables:
    `station_live`, `earthquake_history`, `station_waveform`, with row-level
    security policies that let the ESP32 write to them anonymously.
-4. *(Optional)* Add `OPENAI_API_KEY` to `.env` if you want the AI agent to
-   use a real language model instead of the built-in rule-based analyst.
+4. *(Optional)* Add `GEMINI_API_KEY` to `.env` if you want the AI agent to
+   use Google's Gemini model instead of the built-in rule-based analyst.
    The dashboard works fully without this — see [AI agent behavior](#ai-agent-behavior).
 5. *(Optional)* If you'd rather the backend read Supabase with elevated
    permissions instead of the public anon key, set
@@ -98,8 +98,9 @@ All routes are served from the same origin as the dashboard.
 
 | Method | Route | Returns |
 |---|---|---|
-| `GET` | `/api/status` | Whether Supabase/OpenAI are configured, and which model is active |
+| `GET` | `/api/status` | Whether Supabase/Gemini are configured, and which model is active |
 | `GET` | `/api/events` | Raw event rows, optionally filtered |
+| `GET` | `/api/live` | The latest `station_live` row (drives the live readout/helicorder/health box) |
 | `GET` | `/api/analytics` | Same rows, plus a computed `summary` object (peak PGA, quality score, etc.) |
 | `POST` | `/api/agent` | Natural-language answer from the station analyst |
 
@@ -127,24 +128,25 @@ Response:
 {
   "answer": "...",
   "summary": { "...": "the same summary object /api/analytics returns" },
-  "usedOpenAI": true
+  "usedGemini": true
 }
 ```
 
 ## AI agent behavior
 
-Every question is answered from the currently loaded station data — the
-agent never claims general earthquake knowledge beyond what's in your
-Supabase tables.
+The agent interprets the station's seismic data for whoever is watching the
+dashboard — how strong the shaking is, what an event looks like, how the
+sensors compare — and may draw on general seismology knowledge to explain it.
+It does not hand out engineering/maintenance to-dos.
 
-- **With `OPENAI_API_KEY` set:** the backend sends a compact JSON summary
-  (the computed stats plus the 25 most recent events) to the OpenAI
-  Responses API and returns its answer.
+- **With `GEMINI_API_KEY` set:** the backend sends a compact JSON summary
+  (the computed stats plus the 25 most recent events) to Google's Gemini
+  Generative Language API and returns its answer.
 - **Without it:** a local, deterministic analyst answers using simple
   keyword matching — no network call, no API cost, works offline. It
-  covers the same ground: strongest event, validation error, sensor
-  agreement, threshold tuning, and general summaries.
-- **If the OpenAI call fails** (bad key, network issue, rate limit), the
+  covers the same ground: strongest event, how much to trust the readings,
+  sensor agreement, station health, and general summaries.
+- **If the Gemini call fails** (bad key, network issue, rate limit), the
   backend automatically falls back to the local analyst and prefixes the
   answer so you know it happened.
 
@@ -158,7 +160,7 @@ what it can answer, or type your own.
 | Status pill stays red, message says "Supabase is not configured" | `.env` is missing, or `SUPABASE_URL`/`SUPABASE_ANON_KEY` weren't filled in |
 | Status pill is green but the table says "No matching events" | Your date/classification filters are excluding everything — clear them and hit Refresh |
 | Charts are blank but the table has rows | A field used by that chart (e.g. `pga`, `magnitude`) is `-1` or missing on every row — check what your ESP32 is writing to Supabase |
-| Agent always uses the local analyst even with `OPENAI_API_KEY` set | Check `server.out.log` / your terminal output for an `AI request failed` message — the backend logs the underlying error there |
+| Agent always uses the local analyst even with `GEMINI_API_KEY` set | Check `server.out.log` / your terminal output for an `AI request failed` message — the backend logs the underlying error there |
 | `python server.py` exits immediately | Another process is already using the port in `.env` — change `PORT` or stop the other process |
 
 ## Notes on the sensors
