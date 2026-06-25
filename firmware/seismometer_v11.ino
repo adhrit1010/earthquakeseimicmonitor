@@ -2366,6 +2366,29 @@ void setup() {
     // gives a fresh sample every loop so the channel responds like the others.
     adxl.setDataRate(ADXL345_DATARATE_100_HZ);
     Serial.println(F("ADXL345 OK (range 2g, ODR 100 Hz)"));
+
+    // Liveness check — read twice ~150 ms apart. If the X/Y/Z values are bit-
+    // for-bit identical, the data registers aren't advancing, i.e. the plotter
+    // trace will be a dead-flat line. The usual cause on an ADXL345 breakout is
+    // the CS pin: for I2C it MUST be tied HIGH (to 3V3). If CS floats or is low
+    // the chip is in SPI mode and I2C reads return stale/constant data even
+    // though begin() succeeded. (SDO sets the I2C address: GND=0x53, 3V3=0x1D.)
+    {
+      sensors_event_t a, b;
+      adxl.getEvent(&a); delay(150); adxl.getEvent(&b);
+      if (a.acceleration.x == b.acceleration.x &&
+          a.acceleration.y == b.acceleration.y &&
+          a.acceleration.z == b.acceleration.z) {
+        Serial.println(F("  ! ADXL345 readings IDENTICAL across 150 ms — sensor not "
+                         "updating. Tie the ADXL345 CS pin to 3V3 (I2C mode); check "
+                         "SDA/SCL wiring and SDO (addr 0x53=GND)."));
+      } else {
+        Serial.printf("  ADXL345 live: dx=%.4f dy=%.4f dz=%.4f (m/s^2 between two reads)\n",
+                      (double)(b.acceleration.x - a.acceleration.x),
+                      (double)(b.acceleration.y - a.acceleration.y),
+                      (double)(b.acceleration.z - a.acceleration.z));
+      }
+    }
   }
 
   if (!lis.begin(0x19)) {
