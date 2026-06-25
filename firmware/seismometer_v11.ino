@@ -517,34 +517,40 @@ BLESerial BT;
 
 // Inbound write -> push bytes into the ring, delimited with '\n' so
 // parseBTCommand fires even when the app writes a command without a newline.
-// NimBLE 2.x added a NimBLEConnInfo& parameter to the callbacks; guard so this
-// compiles on both 1.x and 2.x of NimBLE-Arduino.
+//
+// NimBLE changed the callback signatures between 1.x and 2.x (2.x adds a
+// NimBLEConnInfo& parameter). Rather than detect the version with a fragile
+// macro (which silently mis-fired and meant writes were never received), we
+// define BOTH signatures and route them to one handler. Whichever one the
+// installed library declares virtual gets called; the other is just an unused
+// method. No 'override' keyword, so a non-matching signature is a harmless
+// extra method instead of a compile error.
+static void bleHandleWrite(NimBLECharacteristic* c) {
+  auto v = c->getValue();                 // NimBLEAttValue (2.x) / std::string (1.x)
+  size_t n = v.length();
+  Serial.printf("[BLE] RX %u byte(s)\n", (unsigned)n);
+  for (size_t i = 0; i < n; i++) bleRxPush((char)v[i]);
+  bleRxPush('\n');
+}
+
 class BLERxCallback : public NimBLECharacteristicCallbacks {
-#if defined(NIMBLE_CPP_VERSION_MAJOR) && (NIMBLE_CPP_VERSION_MAJOR >= 2)
-  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*info*/) override {
-#else
-  void onWrite(NimBLECharacteristic* c) override {
-#endif
-    auto v = c->getValue();             // NimBLEAttValue (2.x) / std::string (1.x)
-    for (size_t i = 0; i < v.length(); i++) bleRxPush((char)v[i]);
-    bleRxPush('\n');
-  }
+ public:
+  void onWrite(NimBLECharacteristic* c) { bleHandleWrite(c); }
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) { bleHandleWrite(c); }
 };
 
 class BLEConnCallback : public NimBLEServerCallbacks {
-#if defined(NIMBLE_CPP_VERSION_MAJOR) && (NIMBLE_CPP_VERSION_MAJOR >= 2)
-  void onConnect(NimBLEServer*, NimBLEConnInfo&) override { bleConnected = true; }
-  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
-    bleConnected = false;
-    NimBLEDevice::startAdvertising();   // re-advertise so it can reconnect
-  }
-#else
-  void onConnect(NimBLEServer*) override { bleConnected = true; }
-  void onDisconnect(NimBLEServer*) override {
+ public:
+  void onConnect(NimBLEServer*) { bleConnected = true; }
+  void onConnect(NimBLEServer*, NimBLEConnInfo&) { bleConnected = true; }
+  void onDisconnect(NimBLEServer*) {
     bleConnected = false;
     NimBLEDevice::startAdvertising();
   }
-#endif
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) {
+    bleConnected = false;
+    NimBLEDevice::startAdvertising();
+  }
 };
 
 static void __attribute__((optimize("Os"),noinline)) initBLE() {
